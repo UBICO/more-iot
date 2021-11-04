@@ -17,7 +17,7 @@
 #include "Adafruit_MQTT_Client.h"
 
 /**** MQTT ****/
-#define AIO_SERVER      "192.168.1.153"
+#define AIO_SERVER      "192.168.0.254"
 #define AIO_SERVERPORT  1883                   // use 8883 for SSL
 
 WiFiClient client;
@@ -26,7 +26,7 @@ WiFiClient client;
 
 // Setup the MQTT client class by passing in the WiFi client and MQTT server and login details.
 Adafruit_MQTT_Client mqtt(&client, AIO_SERVER, AIO_SERVERPORT);
-char host[] = "192.168.1.153";
+char host[] = "192.168.0.254";
 char clientid[] = "curtain";
 char username[] = "curtain";
 char mqttpassword[] = "ledThingPwd";
@@ -48,8 +48,9 @@ Adafruit_MQTT_Publish curtain_publish = Adafruit_MQTT_Publish(&mqtt, "/devices/a
 #if defined(LED_BUILTIN)
 const int ledPin = LED_BUILTIN;
 #else
-const int ledPin = 13; // manually configure LED pin
+const int ledPin = 2; // manually configure LED pin
 #endif
+
 
 /**** WebThing ****/
 WebThingAdapter *adapter;
