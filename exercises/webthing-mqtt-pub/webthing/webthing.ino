@@ -42,7 +42,6 @@ Adafruit_MQTT_Publish curtain_publish = Adafruit_MQTT_Publish(&mqtt, "/devices/a
 // const char *ssid = "";
 // const char *password = "-1"; 
 
-
 /**** END WiFi ****/
 
 #if defined(LED_BUILTIN)
