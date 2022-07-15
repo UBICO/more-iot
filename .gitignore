@@ -1,1 +1,9 @@
 venv/*
+*.o
+*.d
+*.bin
+*.a
+*.bin
+*.elf
+*.dat
+*.dblite
