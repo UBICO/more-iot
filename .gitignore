@@ -9,3 +9,4 @@ venv/*
 *.dblite
 
 */venv/*
+exercises/04-01-Filtering-server/venv/*
