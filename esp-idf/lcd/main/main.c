@@ -15,6 +15,7 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "lvgl.h"
+#include "esp_random.h"
 
 static const char *TAG = "simple_lcd";
 
@@ -117,11 +118,11 @@ void app_main(void)
         lv_obj_set_style_transform_scale(label, 400, 0); 
 
         // Make the text bold using text decoration
-        lv_obj_set_style_text_decor(label, LV_TEXT_DECOR_NONE, 0);
-        lv_obj_set_style_text_opa(label, LV_OPA_COVER, 0);
+        // lv_obj_set_style_text_decor(label, LV_TEXT_DECOR_NONE, 0);
+        // lv_obj_set_style_text_opa(label, LV_OPA_COVER, 0);
         
         // Create bold effect by adding shadow/outline
-        lv_obj_set_style_text_color(label, lv_color_black(), 0);
+        lv_obj_set_style_text_color(label, lv_color_white(), 0);
         lv_obj_set_style_outline_color(label, lv_color_white(), 0);
         lv_obj_set_style_outline_width(label, 1, 0);
         // lv_obj_set_style_outline_opa(label, LV_OPA_70, 0);
@@ -134,15 +135,12 @@ void app_main(void)
     ESP_LOGI(TAG, "UI created successfully");
     
     // 9. Simple main loop - just keep alive
-    int red = 0, green = 0, blue = 0;
-
-    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(red, green, blue), 0);
     while (1) {
         ESP_LOGI(TAG, "System running, heap: %d KB", (int)(esp_get_free_heap_size() / 1024));
 
-        lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(random(), random(), random()), 0);
+        lv_obj_set_style_bg_color(lv_scr_act(), lv_color_make(esp_random() % 255, esp_random() % 255, esp_random() % 255), 0);
         // lv_obj_set_style_text_color(lv_scr_act(), lv_color_make(random(), random(), random()), 0);
 
-        vTaskDelay(pdMS_TO_TICKS(100)); // Log every 10 seconds
+        vTaskDelay(pdMS_TO_TICKS(1000)); 
     }
 }

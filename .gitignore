@@ -12,3 +12,6 @@ venv/*
 exercises/04-01-Filtering-server/venv/*
 
 *vscode*
+
+esp-idf/*/build/*
+esp-idf/*/managed_components/*
