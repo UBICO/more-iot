@@ -1,569 +1,566 @@
-# Edge AI Model Optimization and Deployment
+# Edge AI Deployment & Operations in IoT Systems
 
 ## Lecture Overview
 
-This lecture dives deep into the techniques and methodologies for optimizing machine learning models for edge deployment from an **ML Systems Engineering** perspective. We will cover quantization, pruning, knowledge distillation, neural architecture search for edge, and deployment strategies using the **D·A·M (Data·Algorithm·Machine)** taxonomy and the **Iron Law** of ML performance.
-
-By the end of this session, students will understand the quantitative trade-offs and engineering principles required for preparing models for resource-constrained environments.
+This lecture covers the **systems engineering** of deploying and operating AI models across heterogeneous IoT edge fleets. We focus on the full lifecycle: model packaging, OTA delivery, runtime execution, observability, and fleet-wide operations — from an IoT infrastructure perspective.
 
 **Duration:** 2 hours  
-**Target audience:** Computer Science graduate students with prior ML experience  
-**Reference:** *Machine Learning Systems* (MLSysBook) by Vijay Janapa Reddi et al., MIT Press 2026 — https://mlsysbook.ai/
+**Target audience:** Computer Science graduate students with IoT/devops/distributed systems background  
+**Reference:** *Machine Learning Systems at Scale* (MLSysBook Vol 2) — https://mlsysbook.ai/vol2/
 
 ---
 
-## Part 1: Quantization — Theory and Practice (30 minutes)
+## Part 1: Model Packaging & Artifact Management (25 minutes)
 
-### Numerical Precision in Neural Networks: The Physics
+### The Model as a Deployable Artifact
 
-From MLSysBook: **"Arithmetic is nearly free; data movement dominates cost."** Quantization attacks both sides of the Roofline:
-
-- **Bandwidth side**: Reduced bitwidth → less data movement (Dvol/BW ↓)
-- **Compute side**: Integer MACs → higher Rpeak, lower energy/op (O/(R·η) ↓)
-
-### Precision Evolution and HW/SW Co-design
-
-**Core Insight**: SW proved reduced precision works → HW added native support. This is **HW/SW Co-design** (Def 1.2): algorithm constraints inform silicon, hardware shapes algorithms (e.g., INT8 quantization enables dense tensor-core packing).
-
-| NVIDIA Tensor Core Trajectory | Precision | Impact |
-|-------------------------------|-----------|--------|
-| Volta (2017) | FP16 | 2× bandwidth reduction |
-| Turing (2018) | INT8/4/1 | Integer tensor cores |
-| Ampere (2020) | TF32, BF16, FP64 | Mixed precision flexibility |
-| Hopper (2022) | FP8 | 8-bit floating point |
-| Blackwell (2024) | FP4 | 4-bit floating point |
-
-**Energy impact**: INT8 **~30× less energy/op** than FP32. FP32→FP16 halves memory traffic; INT8 halves it again.
-
-### Quantization Fundamentals
-
-#### Symmetric vs Asymmetric Quantization
-
-**Symmetric (per-tensor, typical for weights):**
-```
-q = round(r / s)          where s = max(|r|) / (2^(b-1) - 1)
-r ≈ s × q                 Zero-point = 0
-```
-
-**Asymmetric (per-tensor, typical for activations):**
-```
-q = round(r / s) + z      where s = (max(r) - min(r)) / (2^b - 1)
-                          z = -round(min(r) / s)
-r ≈ s × (q - z)
-```
-
-#### Per-Channel vs Per-Tensor Quantization
-
-| Aspect | Per-Tensor | Per-Channel (weights only) |
-|--------|------------|---------------------------|
-| **Scale/Zero-point** | 1 per tensor | 1 per output channel |
-| **Accuracy** | Lower for weights | Better preserves weight distribution |
-| **Hardware** | Simpler | Requires per-channel dequantization |
-| **Edge support** | Universal | Tensor Cores, Edge TPU, ONNX Runtime |
-
-**Example**: Weight tensor shape [C_out, C_in, K, K]
-- Per-tensor: 1 scale for all C_out × C_in × K × K elements
-- Per-channel: C_out scales (one per output channel)
-
-### Post-Training Quantization (PTQ)
-
-PTQ applies quantization after model training without retraining:
-
-**Process:**
-1. **Calibration**: Run representative dataset through model (typically 100-500 samples)
-2. **Range estimation**: Determine min/max values for each tensor
-3. **Scale calculation**: Compute quantization scale and zero-point
-4. **Replacement**: Replace FP32 operations with quantized equivalents
-
-**Quantized matrix multiplication:**
-```
-output = Scale_w × Scale_x × (int8_W - ZP_w) × (int8_X - ZP_x) + bias
-
-Where:
-- Scale_w: Weight quantization scale
-- Scale_x: Activation quantization scale  
-- ZP_w: Weight zero-point (0 for symmetric)
-- ZP_x: Activation zero-point
-- int8_W, int8_X: Quantized integer values
-```
-
-**Accuracy impact (MLSysBook data):**
-- Typical loss: 1-3% for well-trained models
-- ResNet/VGG: Usually < 2% drop
-- MobileNet: Often < 1% drop  
-- RNNs/LSTMs: Can suffer 5-10% drop without QAT
-- Transformers: Attention scores sensitive; may need QAT
-
-### Quantization-Aware Training (QAT)
-
-QAT simulates quantization during training using **fake quantization nodes**:
-
-**Key techniques:**
-- **Fake quantization nodes**: Added to forward pass to simulate quantization errors
-- **Quantization simulation**: Training sees same errors as inference
-- **Backpropagation through quantization**: Gradients flow through fake ops (straight-through estimator)
-
-**TensorFlow Lite QAT workflow:**
-```python
-import tensorflow as tf
-import tensorflow_model_optimization as tfmot
-
-# Step 1: Prepare model
-model = tf.keras.models.load_model('path/to/model')
-
-# Step 2: Apply quantization-aware training
-qat_model = tfmot.quantization.keras.quantize_model(model)
-
-# Step 3: Fine-tune with representative dataset
-qat_model.compile(optimizer='adam', loss='mse')
-qat_model.fit(rep_dataset, epochs=5)
-
-# Step 4: Convert to TFLite
-converter = tf.lite.TFLiteConverter.from_keras_model(qat_model)
-converter.optimizations = [tf.lite.Optimize.DEFAULT]
-tflite_model = converter.convert()
-```
-
-**When QAT is worth the effort (MLSysBook guidance):**
-- PTQ accuracy drop > 2-3%
-- Models with sensitive layers (attention, small activations)
-- Ultra-low precision (INT4, FP4)
-- Regulatory accuracy requirements
-
----
-
-## Part 2: Model Pruning and Sparsification (20 minutes)
-
-### The Lottery Ticket Hypothesis (Frankle & Carbin, 2019)
-
-Dense, randomly initialized networks contain subnetworks ("winning tickets") that can match or exceed original accuracy when trained with matching initializations.
-
-**Implications for edge AI (MLSysBook):**
-- Smaller models can achieve same accuracy
-- Pruning should be **iterative** (re-training between pruning steps)
-- Network connectivity matters more than raw parameter count
-- **Critical**: A pruning strategy that reduces FLOPs but destroys memory access patterns can *slow down* execution on real hardware (D·A·M intersection)
-
-### Unstructured vs Structured Pruning
-
-| Aspect | Unstructured | Structured |
-|--------|--------------|------------|
-| **Granularity** | Individual weights | Filters, channels, layers |
-| **FLOP reduction** | Theoretical only | Direct, measurable |
-| **Memory savings** | Requires sparse kernels | Natural size reduction |
-| **Hardware support** | Rare on edge | Universal |
-| **Speedup on edge** | Often negative | Positive |
-
-**Edge reality**: Most edge accelerators don't support sparse inference efficiently. **Use structured pruning.**
-
-### Structured Pruning Workflow
-
-```python
-import torch.nn.utils.prune as prune
-
-# Filter pruning: remove entire convolutional filters
-prune.ln_structured(module, name='weight', n=2, dim=0, amount=0.3)
-
-# Iterative pruning schedule
-for epoch in range(total_epochs):
-    if epoch % prune_freq == 0:
-        current_sparsity = min(0.5, epoch * 0.01)
-        prune.ln_structured(module, 'weight', n=2, dim=0, amount=current_sparsity)
-        fine_tune(model, epochs=1)
-```
-
-### Pruning Decision Framework (D·A·M)
+In IoT systems, a model is not just weights — it's a **versioned, signed, platform-specific artifact** with dependencies.
 
 ```
-Target: Reduce O (Algorithm) while preserving memory access patterns (Machine)
-
-Step 1: Profile baseline — measure T = Dvol/BW + O/(R·η) + Llat
-Step 2: Apply structured pruning → measure new O, R·η (may change!)
-Step 3: If latency increases despite O↓ → pruning hurt memory patterns → revert
-Step 4: Iterate with fine-tuning until accuracy/latency target met
+┌─────────────────────────────────────────────────────────────────┐
+│                    MODEL ARTIFACT BUNDLE                         │
+├─────────────────────────────────────────────────────────────────┤
+│  model.tflite / model.onnx      ← Compiled model (INT8/FP16)   │
+│  metadata.json                  ← Schema, version, requirements │
+│  preprocessing.yaml             ← Normalization, tokenization  │
+│  postprocessing.yaml            ← Thresholds, NMS, decoding    │
+│  signature.sha256               ← Integrity verification        │
+│  requirements.txt               ← Runtime deps (TFLite 2.14+)   │
+│  platform_manifest.yaml         ← Target: rpi4-arm64, jetson   │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
----
+### Metadata Schema (Interoperability)
 
-## Part 3: Knowledge Distillation (20 minutes)
-
-### Teacher-Student Architecture
-
-Large "teacher" model trains small "student" model to mimic its behavior:
-
-```
-Teacher Model (ResNet-50, BERT-Large) → Soft Labels + Intermediate Features
-                                           ↓
-Student Model (MobileNet, TinyBERT) ← Hard Labels + Distillation Loss
-```
-
-**Soft labels contain richer information than hard labels:**
-- Correct class probability: 95%
-- Alternative class: 3%
-- Third class: 2%
-- Student learns **relative confidences**, not just top prediction
-
-### Distillation Loss Functions
-
-**Standard distillation loss (Hinton et al., 2015):**
-```
-L_distill = KL-divergence(softmax(student/T) || softmax(teacher/T))
-L_task    = Cross-entropy(student || ground_truth)
-L_total   = α × L_distill + (1-α) × L_task
-
-Where T = temperature (typically 2-20)
-```
-
-**Advanced techniques (MLSysBook Algorithm∩Machine):**
-- **Attention transfer**: Match attention maps in transformers (Zagoruyko & Komodakis, 2017)
-- **Feature map matching**: Intermediate activation distillation (Romero et al., 2015)
-- **Contrastive distillation**: Preserve relative distance relationships
-
-### Edge-Specific Distillation Strategies
-
-**Progressive distillation (for extreme compression):**
-1. Teacher: Large model (high accuracy, O_large)
-2. Student-1: Medium model (moderate accuracy, O_medium)  
-3. Student-2: Tiny model (edge deployment, O_tiny)
-4. Each step distills from previous student
-
-**Multi-task distillation:**
-- Single teacher, multiple students with different specializations
-- Each student optimized for specific edge device class (MCU, SBC, Server)
-- Shared knowledge base across device types
-
-**Distillation for quantization (MLSysBook):**
-- Teacher: FP32 model
-- Student: Quantized architecture (INT8-aware)
-- Distillation helps recover quantization accuracy loss
-
----
-
-## Part 4: Neural Architecture Search for Edge (15 minutes)
-
-### The D·A·M View of NAS
-
-NAS optimizes at **Algorithm ∩ Machine** intersection: How to Execute Efficiently.
-
-**Constraints for edge (from MLSysBook):**
-- **Latency**: Must meet real-time SLAs (Llat constraint)
-- **Model size**: Fit within storage (Dvol constraint)
-- **Power consumption**: Energy budget (Machine constraint)
-- **Accuracy**: Cannot sacrifice too much (Algorithm quality)
-
-### EfficientNet: Compound Scaling (Tan & Le, 2019)
-
-EfficientNet discovers optimal scaling between depth, width, and resolution:
-
-```
-depth: d = α^φ
-width: w = β^φ  
-resolution: r = γ^φ
-
-Subject to: α·β²·γ² ≈ 2 (for 2× FLOPs)
-```
-
-**Edge-specific modifications:**
-- Reduce resolution scaling (γ closer to 1) — memory bound
-- Emphasize width scaling (wider shallow networks) — better parallelism
-- Limit depth for latency-constrained devices (Llat constraint)
-
-### MobileNet Architecture (Howard et al., 2017)
-
-Uses **depthwise separable convolutions** to reduce computation:
-
-| Convolution Type | Operations | Reduction |
-|------------------|------------|-----------|
-| Standard | H×W×K×C | 1× (baseline) |
-| Depthwise Separable | H×W×(K + K×C) | ~1/K + 1/C |
-
-For K=32, C=64: **~30× fewer operations**
-
-### Neural Architecture Search Constraints
-
-**ProxylessNAS approach (Cai et al., 2019):**
-- Search directly on target hardware (no proxy)
-- Use weight sharing to reduce search cost
-- Include hardware metrics in loss function: `L = L_task + λ·latency(device)`
-
-**Once-for-All (OFA) Network (Cai et al., 2020):**
-- Train single supernet supporting many sub-networks
-- Extract specialized subnets for each edge device
-- Avoids retraining for each deployment target
-
----
-
-## Part 5: Model Compilation and Runtime Optimization (20 minutes)
-
-### The Compilation Stack (MLSysBook: Algorithm ∩ Machine)
-
-```
-Model (PyTorch/TF) → Graph Optimizations → Kernel Selection → Code Generation
-                        ↓                      ↓                 ↓
-                 Operator Fusion        Hardware-specific    Memory Planning
-                 Constant Folding       Kernels (TensorRT,   (Static for MCU)
-                 Layout Transforms      TVM, XLA)            
-```
-
-### TensorFlow Lite Conversion with Optimizations
-
-```python
-import tensorflow as tf
-
-converter = tf.lite.TFLiteConverter.from_keras_model(model)
-
-# Optimization flags
-converter.optimizations = [tf.lite.Optimize.DEFAULT]
-
-# Representative dataset for PTQ
-def representative_dataset():
-    for input_value in calibration_data:
-        yield [input_value]
-
-converter.representative_dataset = representative_dataset
-
-# Quantization configuration
-converter.target_spec.supported_ops = [
-    tf.lite.OpsSet.TFLITE_BUILTINS_INT8
-]
-converter.inference_input_type = tf.int8
-converter.inference_output_type = tf.int8
-
-# Experimental new converter (recommended)
-converter._experimental_new_converter = True
-
-# Convert
-tflite_model = converter.convert()
-```
-
-### ONNX Runtime for Edge
-
-```bash
-# Install
-pip install onnxruntime onnxruntime-tools
-
-# Optimize with graph transformations
-python -c "
-import onnx
-from onnxruntime.transformers import optimizer
-
-# Fusion, constant folding, layout optimization
-optimized_model = optimizer.optimize_model('model.onnx')
-optimized_model.save_model_to_file('model_optimized.onnx')
-"
-```
-
-### Apache TVM: End-to-End Compilation
-
-```python
-import tvm
-from tvm import relay
-
-# Load model
-mod, params = relay.frontend.from_tensorflow(model_path)
-
-# Target-specific compilation
-target = tvm.target.Target("llvm -mt=armv7l -mattr=+neon")  # ARM Cortex-A
-# target = tvm.target.Target("cuda -arch=sm_70")  # Jetson GPU
-
-# Compile with optimizations
-with tvm.transform.PassContext(opt_level=3):
-    lib = relay.build(mod, target=target, params=params)
-
-# Deploy artifacts: lib.so (compiled kernels), graph.json, params
-lib.export_library("model.so")
-```
-
-### Runtime Performance Profiling (MLSysBook: Benchmarking)
-
-**Micro-benchmarking rules (Systems Detective's Rules):**
-1. **Warm-up rule** — Don't measure cold-start iterations
-2. **Variance rule** — Report Coefficient of Variation (CV = σ/μ); CV > 5% = noisy
-3. **Speed-of-light check** — Compare achieved throughput vs roofline
-4. **Flush rule** — Flush L2 cache between memory bandwidth runs
-
-**TensorFlow Lite benchmark tool:**
-```bash
-./benchmark_model --graph=model.tflite \
-    --num_threads=4 \
-    --warmup_runs=10 \
-    --num_runs=100 \
-    --enable_op_profiling=true
-```
-
-**Metrics to track:**
-| Metric | Iron Law Term | Target |
-|--------|---------------|--------|
-| Average inference time (ms) | T | < SLA |
-| Standard deviation | Consistency | CV < 5% |
-| Peak memory usage (RAM) | Dvol | < Device RAM |
-| Model load time | Llat | < 100 ms |
-| Power consumption | Energy/inference | < Budget |
-
----
-
-## Part 6: Deployment Strategies (15 minutes)
-
-### Over-the-Air (OTA) Model Updates
-
-**Secure update pipeline (D·A·M lifecycle):**
-1. **Model signing** (Algorithm integrity): Digital signature on model binary
-2. **Delta updates** (Data efficiency): Binary diff for bandwidth efficiency
-3. **Staged rollout** (Machine safety): Canary deployment to subset of devices
-4. **Rollback mechanism** (Machine reliability): Automatic revert on performance degradation
-5. **Integrity verification** (Algorithm validity): Hash check before activation
-
-**OTA architecture with D·A·M monitoring:**
-```
-[Cloud Model Registry] → [Update Service] → [Edge Device]
-                              ↓
-                    [OTA Agent (background)]
-                              ↓
-                   [Model Validator/Benchmark]
-                              ↓
-                     [A/B Testing Framework]
-                              ↓
-              [Telemetry: Accuracy, Latency, Power, Memory]
-```
-
-### Model Versioning and A/B Testing
-
-**Version format (semantic + platform):**
-```
-v<major>.<minor>.<patch>-<platform>-<quantization>-<optimization>
-
-Examples:
-v1.2.3-rpi4-int8-pruned30
-v1.2.4-jetson-fp16-distilled
-v2.0.0-esp32-uint8-nas
-```
-
-**A/B testing with D·A·M metrics:**
-```python
-class ModelABTester:
-    def __init__(self, model_a, model_b):
-        self.models = {'a': model_a, 'b': model_b}
-        self.metrics = {'a': [], 'b': []}
-    
-    def run_inference(self, input_data, ground_truth):
-        variant = random.choice(['a', 'b'])
-        prediction = self.models[variant].predict(input_data)
-        
-        # Log D·A·M metrics
-        self.metrics[variant].append({
-            'accuracy': (prediction == ground_truth),     # Algorithm quality
-            'latency_ms': measured_latency,               # Machine throughput
-            'power_mw': measured_power,                   # Machine efficiency
-            'memory_mb': peak_memory,                     # Data volume
-            'timestamp': time.time()
-        })
-```
-
-### Edge Monitoring and Feedback Loops
-
-**Telemetry collection (D·A·M observability):**
-| Axis | Metrics | Purpose |
-|------|---------|---------|
-| **Data (D)** | Input distribution shift, feature drift | Detect data quality issues |
-| **Algorithm (A)** | Accuracy, confidence scores, calibration | Detect model degradation |
-| **Machine (M)** | Latency (p50, p99), throughput, power, memory, temperature | Detect hardware issues |
-
-**Federated learning integration (Data privacy + Algorithm improvement):**
-- Periodically collect **gradients** (not raw data) — Data (D) privacy
-- Aggregate updates in cloud — Algorithm (A) improvement
-- Push improved models to fleet — Machine (M) deployment
-- Handle device heterogeneity (different Rpeak, memory)
-
----
-
-## Part 7: Hands-on Optimization Case Study (10 minutes)
-
-### Image Classification: ResNet-18 → Edge Optimized
-
-| Stage | Model | Size | Accuracy | Latency (Pi 4) | Ops (GFLOPs) |
-|-------|-------|------|----------|----------------|--------------|
-| **Baseline** | ResNet-18 FP32 | 45 MB | 93% | 150 ms | 1.8 |
-| **Architecture** | MobileNetV3 FP32 | 12 MB | 91% | 25 ms | 0.22 |
-| **Quantization** | MobileNetV3 INT8 | 3 MB | 90% | 12 ms | 0.22 |
-| **Pruning** | MobileNetV3 INT8 + 40% structured | 1.8 MB | 89% | 8 ms | 0.13 |
-| **Distillation** | TinyNet (student) INT8 | 1.2 MB | 88% | 6 ms | 0.08 |
-
-**Iron Law Analysis:**
-```
-Baseline: T = 45MB/BW + 1.8G/(R·η) + Llat = 150ms
-Optimized: T = 1.2MB/BW + 0.08G/(R·η) + Llat = 6ms
-```
-
-### Audio Processing: Keyword Spotting on MCU
-
-```python
-# Edge Impulse configuration for voice commands
+```yaml
+# metadata.json
 {
-  "model": {
-    "type": "keras",
-    "architecture": "ds-cnn",
-    "window_size": 1000,  # ms
-    "window_increase": 500,
-    "frequency": 16000,
-    "quantized": true
+  "model_id": "defect-detector-v3",
+  "version": "3.2.1",
+  "framework": "tflite",
+  "precision": "int8",
+  "input_schema": {
+    "name": "image",
+    "shape": [1, 224, 224, 3],
+    "dtype": "uint8",
+    "normalization": {"mean": [123.675, 116.28, 103.53], "std": [58.395, 57.12, 57.375]}
   },
-  "deployment": {
-    "target": "arduino-nano-33-ble",
-    "memory": "256KB RAM",
-    "flash": "1MB Flash"
-  }
+  "output_schema": {
+    "name": "defect_class",
+    "shape": [1, 7],
+    "dtype": "float32",
+    "classes": ["normal", "scratch", "dent", "crack", "corrosion", "discolor", "foreign"]
+  },
+  "requirements": {
+    "runtime": "tflite >= 2.14.0",
+    "delegates": ["gpu", "nnapi"],
+    "memory_mb": 150,
+    "compute_tops": 0.5
+  },
+  "split_config": {
+    "supports_split": true,
+    "split_points": [12, 18, 24],
+    "activation_sizes_mb": [0.8, 2.1, 4.5]
+  },
+  "signature": "sha256:abc123...",
+  "built_at": "2026-01-15T10:30:00Z",
+  "built_by": "ci-pipeline-42"
 }
 ```
 
-**Results on Cortex-M4 (256 KB RAM, 1 MB Flash):**
-- Model: DS-CNN, 150 KB INT8
-- Keywords: 4 ("start", "stop", "up", "down")
-- Latency: 20 ms per inference
-- Power: < 5 mA active, < 1 µA sleep
-- Accuracy: 98% in 60 dB factory noise
+### Multi-Platform Build Pipeline
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                    CI/CD FOR EDGE MODELS                            │
+├────────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  [Train] → [Export ONNX] → [Quantize] → [Compile per Platform]   │
+│    │           │            │              │                       │
+│    ▼           ▼            ▼              ▼                       │
+│  PyTorch    ONNX          TFLite         ┌──────────────────┐     │
+│  Checkpoint            PTQ/QAT           │ rpi4-arm64       │     │
+│                                        │ jetson-arm64     │     │
+│                                        │ x86_64-cuda      │     │
+│                                        │ esp32-xtensa     │     │
+│                                        └────────┬─────────┘     │
+│                                                 │               │
+│                                                 ▼               │
+│                                        [Sign & Package]         │
+│                                                 │               │
+│                                                 ▼               │
+│                                        [Model Registry]         │
+│                                                 │               │
+│                                                 ▼               │
+│                                        [OTA Delivery]           │
+│                                                                    │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+**Platform-Specific Compilation:**
+| Platform | Toolchain | Output | Delegates |
+|----------|-----------|--------|-----------|
+| Raspberry Pi 4/5 | TVM / TFLite | `.tflite` / `.so` | GPU (V3D), NNAPI |
+| Jetson Orin/NX | TensorRT / TFLite | `.plan` / `.tflite` | GPU, DLA |
+| x86_64 Server | ONNX Runtime / TensorRT | `.onnx` / `.plan` | CUDA, TensorRT |
+| ESP32 / MCU | TFLite Micro / TVM | `.tflite` / `.c` | CMSIS-NN |
 
 ---
 
-## Summary and Questions
+## Part 2: Over-the-Air (OTA) Delivery System (30 minutes)
 
-**Key optimization techniques with D·A·M analysis:**
+### OTA Architecture for Model Updates
 
-| Technique | Algorithm (O) | Machine (R·η) | Data (Dvol/BW) |
-|-----------|---------------|---------------|----------------|
-| **Quantization (INT8)** | O unchanged | Rpeak↑ 4-8× (Tensor Cores) | Dvol↓ 4× |
-| **Structured Pruning** | O↓ 30-50% | R·η may change | Dvol↓ proportional |
-| **Distillation** | O↓ via smaller arch | Rpeak↑ (smaller model) | Dvol↓ proportional |
-| **NAS / EfficientNet** | O↓ optimal scaling | R·η↑ (better HW fit) | Dvol↓ |
-| **Operator Fusion** | O unchanged | ηhw↑ (less kernel launch) | BW↓ (fewer intermediates) |
+```
+┌────────────────────────────────────────────────────────────────────────┐
+│                    OTA DELIVERY PIPELINE                                │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│  [Model Registry]                                                     │
+│       │                                                               │
+│       ▼                                                               │
+│  [Delta Generator] ──→ [bsdiff / xdelta] ──→ [Delta Package]         │
+│       │                      (90% size reduction)                     │
+│       ▼                                                               │
+│  [Signing Service] ──→ [ECDSA-P256] ──→ [Signed Delta]               │
+│       │                                                               │
+│       ▼                                                               │
+│  [CDN / Edge Cache] ──→ [Geo-distributed, TLS]                       │
+│       │                                                               │
+├───────┼───────────────────────────────────────────────────────────────┤
+│       │              NETWORK (MQTT/HTTPS/CoAP)                        │
+│       ▼                                                               │
+│  ┌────────────────────────────────────────────────────────────────┐  │
+│  │                    DEVICE AGENT (per device)                    │  │
+│  │  [OTA Client] → [Verifier] → [Stager] → [Applier] → [Validator]│  │
+│  │       │            │           │           │            │       │  │
+│  │       ▼            ▼           ▼           ▼            ▼       │  │
+│  │  Download      Verify      Write to    Swap active   Health     │  │
+│  │  delta         signature   staging    model slot     check      │  │
+│  │                                                                  │  │
+│  │  [Rollback Manager] ──→ [Previous slot] ──→ [Auto-revert]      │  │
+│  └────────────────────────────────────────────────────────────────┘  │
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
+```
 
-**Discussion points:**
-- When does quantization-aware training provide >1% accuracy recovery over PTQ?
-- How do you verify that pruning improved R·η and not just O?
-- What benchmarking methodology ensures reproducible edge measurements?
+### Delta Update Strategy (Bandwidth Optimization)
+
+| Strategy | Size Reduction | Complexity | Use Case |
+|----------|----------------|------------|----------|
+| **Full replacement** | 0% | Low | Major version changes |
+| **bsdiff (binary diff)** | 85-95% | Medium | Weight updates, fine-tunes |
+| **Layer-wise delta** | 90-99% | High | Structured pruning, quantization changes |
+| **Quantization delta** | 50-75% | Medium | FP32→INT8 conversion |
+
+**bsdiff Example:**
+```
+Original model: 15.2 MB
+Updated model:  15.4 MB (fine-tuned weights)
+bsdiff delta:   0.8 MB  (95% reduction)
+```
+
+### OTA Rollout Strategies
+
+```yaml
+# rollout.yaml
+strategy: canary
+phases:
+  - name: "internal"
+    percentage: 5
+    devices: ["device-group:internal-test"]
+    duration: "2h"
+    success_criteria:
+      - inference_latency_p99 < 100ms
+      - error_rate < 0.1%
+      - memory_usage < 80%
+      - no_crash_loop
+  
+  - name: "canary"
+    percentage: 10
+    devices: ["region:eu-west", "device-type:jetson-orin"]
+    duration: "6h"
+    success_criteria:
+      - inference_latency_p99 < 100ms
+      - accuracy_drift < 2%
+      - power_draw < budget
+  
+  - name: "progressive"
+    percentage: [25, 50, 75, 100]
+    duration_per_phase: "4h"
+    auto_promote: true
+    rollback_on_failure: true
+```
 
 ---
 
-## Practical Exercises
+## Part 3: Edge Runtime & Execution Environment (25 minutes)
 
-Students should attempt these optimizations on provided models:
+### Containerized Inference Runtime
 
-1. **Quantize a pre-trained model**trained model** using TensorFlow Lite PTQ and QAT; compare accuracy
-2. **Apply structured pruning** to remove 30% of filters; measure actual latency change
-3. **Implement distillation** from ResNet-50 to MobileNetV3; evaluate student performance
-4. **Run TVM compilation** for ARM Cortex-A and measure speedup over TFLite
-5. **Design OTA update** with delta compression and A/B testing framework
+**Why containers at the edge?**
+- Dependency isolation (TFLite vs ONNX Runtime vs TensorRT)
+- Resource limits (CPU, RAM, GPU memory)
+- Security sandboxing
+- Consistent deployment across heterogeneous fleet
+
+```yaml
+# docker-compose.edge.yml
+version: '3.8'
+services:
+  inference:
+    image: registry.example.com/edge-inference:tflite-2.14
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+          reservations:
+            devices:
+              - driver: nvidia
+                count: 1
+                capabilities: [gpu]
+    environment:
+      - MODEL_PATH=/models/defect-detector-v3.tflite
+      - DELEGATE=gpu
+      - BATCH_SIZE=1
+      - NUM_THREADS=4
+    volumes:
+      - /dev/video0:/dev/video0  # Camera access
+      - model-store:/models
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr=:50051"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  model-adapter:
+    image: registry.example.com/model-adapter:v2
+    depends_on:
+      inference:
+        condition: service_healthy
+    environment:
+      - SPLIT_MODE=auto
+      - NETWORK_MONITOR_INTERVAL=5s
+
+volumes:
+  model-store:
+    driver: local
+```
+
+### Lightweight Alternatives: WASM & Unikernels
+
+| Runtime | Overhead | Isolation | Hardware Access | Best For |
+|---------|----------|-----------|-----------------|----------|
+| **Docker/containerd** | Medium | Strong | Full (GPU, devices) | General edge servers |
+| **K3s (K8s)** | Low | Strong | Full | Gateway clusters |
+| **WASM (wasmEdge, Wasmer)** | **Minimal** | Strong | Limited (WASI + extensions) | MCUs, constrained |
+| **Unikernel (Unikraft)** | **Minimal** | Strong | Direct | Specialized appliances |
+| **Bare metal / systemd** | None | None | Full | Single-purpose devices |
+
+**WASM for Edge Inference:**
+```rust
+// wasm module for TFLite inference
+#[wasm_bindgen]
+pub fn infer(input: &[u8]) -> Vec<f32> {
+    let model = Model::load_from_bytes(include_bytes!("model.tflite"))?;
+    let mut interpreter = Interpreter::new(&model)?;
+    interpreter.set_input(input)?;
+    interpreter.invoke()?;
+    interpreter.get_output()
+}
+```
+- **Size**: ~2 MB (vs 100+ MB container)
+- **Cold start**: < 10 ms
+- **Runs on**: WASM runtime (wasmtime, wasmedge) on Linux/RTOS
 
 ---
 
-## Further Reading (MLSysBook Primary Source)
+## Part 4: Observability & Fleet Monitoring (20 minutes)
 
-- **Primary**: *Machine Learning Systems* (MLSysBook) — https://mlsysbook.ai/
-  - Volume I: [Model Compression](https://mlsysbook.ai/vol1/model_compression/model_compression.html) — Quantization, Pruning, Distillation
-  - Volume I: [Hardware Acceleration](https://mlsysbook.ai/vol1/hw_acceleration/hw_acceleration.html) — Tensor Cores, Numerics, Memory Wall
-  - Volume I: [Benchmarking](https://mlsysbook.ai/vol1/benchmarking/benchmarking.html) — D·A·M Validation, Micro/Macro/End-to-End
-  - Volume I: [Model Training](https://mlsysbook.ai/vol1/training/training.html) — Iron Law, Mixed Precision
-  - Appendix: [D·A·M Taxonomy](https://mlsysbook.ai/vol1/backmatter/appendix_dam.html)
-- "Quantization and Training of Neural Networks for Efficient Integer-Arithmetic-Only Inference" — Jacob et al., 2018
-- "The Lottery Ticket Hypothesis" — Frankle & Carbin, 2019
-- "MobileNets: Efficient Convolutional Neural Networks for Mobile Vision Applications" — Howard et al., 2017
-- "Once for All: Train One Network and Specialize it for Efficient Deployment" — Cai et al., 2020
+### The Four Golden Signals for Edge AI (Adapted from Google SRE)
+
+| Signal | Edge AI Metric | Collection |
+|--------|----------------|------------|
+| **Latency** | `inference_latency_ms` (p50, p95, p99) | Per-request, pushed via MQTT |
+| **Traffic** | `inference_requests_total`, `batch_size` | Counter, histogram |
+| **Errors** | `inference_errors_total` (by type: OOM, timeout, delegate_fail) | Counter with labels |
+| **Saturation** | `gpu_utilization`, `memory_usage_pct`, `thermal_throttling` | Gauge, 10s interval |
+
+### Telemetry Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    TELEMETRY ARCHITECTURE                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  [Device]                                                         │
+│     │                                                              │
+│     ├──→ [Metrics] ──→ [Prometheus Pushgateway] ──→ [Prometheus] │
+│     │       (10s)         (batch, retry)           (scrape)      │
+│     │                                                              │
+│     ├──→ [Logs] ──→ [Fluent Bit] ──→ [Loki / Elasticsearch]      │
+│     │       (structured)   (tail, parse)        (query)          │
+│     │                                                              │
+│     ├──→ [Traces] ──→ [OpenTelemetry] ──→ [Jaeger / Tempo]       │
+│     │       (W3C)          (SDK)           (distributed trace)   │
+│     │                                                              │
+│     └──→ [Health] ──→ [MQTT heartbeat] ──→ [Alertmanager]        │
+│             (30s)         (topic: health)      (rules)           │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Critical Edge AI Dashboards
+
+**1. Fleet Health Overview**
+- Devices online / offline / degraded
+- Model version distribution (pie chart)
+- Rollout progress bars
+
+**2. Inference Performance**
+- Latency heatmap by device type / region
+- Throughput (inferences/sec) per device
+- Delegate utilization (GPU vs CPU fallback)
+
+**3. Resource Saturation**
+- Memory pressure (OOM kills count)
+- Thermal throttling events
+- Power consumption trends
+
+**4. Model Quality Drift**
+- Confidence distribution shifts
+- Prediction entropy over time
+- Human-label feedback loop (when available)
+
+### Alerting Rules (PrometheusRule)
+
+```yaml
+groups:
+- name: edge-ai-alerts
+  rules:
+  - alert: DeviceOffline
+    expr: time() - device_last_heartbeat > 120
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Device {{ $labels.device_id }} offline"
+      
+  - alert: InferenceLatencyHigh
+    expr: histogram_quantile(0.99, rate(inference_latency_bucket[5m])) > 200
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "High latency on {{ $labels.device_type }}"
+      
+  - alert: ModelAccuracyDrift
+    expr: avg(prediction_entropy) by (model_version) > 1.5
+    for: 1h
+    labels:
+      severity: warning
+    annotations:
+      summary: "Accuracy drift detected for {{ $labels.model_version }}"
+      
+  - alert: ThermalThrottling
+    expr: thermal_throttling_events_total > 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Thermal throttling on {{ $labels.device_id }}"
+```
+
+---
+
+## Part 5: Device Lifecycle Management (20 minutes)
+
+### Device Provisioning & Onboarding
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    DEVICE ONBOARDING FLOW                        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  1. MANUFACTURING                                                │
+│     ├─ Burn device certificate (X.509, TPM)                     │
+│     ├─ Flash bootloader + base OS (Yocto / BalenaOS)            │
+│     └─ Provision hardware ID → Device Registry                  │
+│                                                                  │
+│  2. FIRST BOOT (Zero-Touch Provisioning)                        │
+│     ├─ DHCP + DNS → Discover provisioning server                │
+│     ├─ Mutual TLS auth with device cert                         │
+│     ├─ Pull device config (fleet, region, model assignments)    │
+│     ├─ Install device agent (K3s agent / custom)                │
+│     └─ Register with Fleet Orchestrator                         │
+│                                                                  │
+│  3. MODEL DEPLOYMENT                                             │
+│     ├─ Orchestrator assigns models based on device caps         │
+│     ├─ Device pulls model artifacts (delta if update)           │
+│     ├─ Verify signature, stage, validate                        │
+│     └─ Report "model_ready" to orchestrator                     │
+│                                                                  │
+│  4. ONGOING OPERATIONS                                           │
+│     ├─ Heartbeat + telemetry (30s interval)                     │
+│     ├─ OTA updates (model, OS, agent)                           │
+│     ├─ Config changes (split point, thresholds)                 │
+│     └─ Certificate rotation (90-day expiry)                     │
+│                                                                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Certificate Management at Scale
+
+| Challenge | Solution |
+|-----------|----------|
+| **10,000+ device certs** | PKI with intermediate CAs per region/fleet |
+| **Rotation without downtime** | Dual-certificate overlap (new + old valid) |
+| **Revocation** | CRL/OCSP stapled to MQTT broker; short-lived certs (24h) + renewal |
+| **Edge CA** | Local CA at gateway for leaf device certs (reduces cloud dependency) |
+
+### Decommissioning & Secure Erasure
+
+```bash
+# Secure decommission workflow
+1. Drain: Stop accepting inference requests
+2. Flush: Complete in-flight requests, upload final telemetry
+3. Revoke: Invalidate device certificate in PKI
+4. Wipe: Cryptographic erase of model storage (AES-256 key destruction)
+5. Unregister: Remove from fleet orchestrator, device registry
+6. Physical: Factory reset for redeployment
+```
+
+---
+
+## Part 6: Split Computing Operations (15 minutes)
+
+### Runtime Split Point Adaptation
+
+```python
+# Dynamic split point selection based on runtime conditions
+class AdaptiveSplitInference:
+    def __init__(self, model_manifest):
+        self.split_points = model_manifest['split_config']['split_points']
+        self.activation_sizes = model_manifest['split_config']['activation_sizes_mb']
+        self.current_split = 0  # Start conservative
+        
+    def select_split_point(self, network_monitor, device_metrics):
+        """
+        Choose optimal split point based on:
+        - Current bandwidth (Mbps)
+        - Latency budget (ms)
+        - Edge device load (CPU/GPU %)
+        - Server queue depth
+        """
+        bw_mbps = network_monitor.current_bandwidth_mbps()
+        latency_budget = 100  # ms
+        edge_load = device_metrics.gpu_utilization_pct
+        
+        for i, (split_layer, act_size_mb) in enumerate(
+            zip(self.split_points, self.activation_sizes)
+        ):
+            # Estimate transfer time
+            transfer_ms = (act_size_mb * 8) / bw_mbps
+            
+            # Estimate edge compute (increases with split layer)
+            edge_compute_ms = self.estimate_edge_compute(i, edge_load)
+            
+            # Estimate server queue time
+            server_queue_ms = network_monitor.server_queue_estimate()
+            
+            total_estimated = edge_compute_ms + transfer_ms + server_queue_ms
+            
+            if total_estimated < latency_budget * 0.8:
+                return i
+                
+        return len(self.split_points) - 1  # Max offload
+```
+
+### Handling Network Partitions
+
+| Scenario | Behavior |
+|----------|----------|
+| **Edge→Gateway link down** | Fall back to local-only inference (early exit / full model if cached) |
+| **Gateway→Cloud link down** | Queue model updates locally; continue inference with current model |
+| **Intermittent connectivity** | Exponential backoff for telemetry; prioritize model updates over logs |
+| **High latency / packet loss** | Reduce split point (more local compute), increase compression |
+
+**Graceful Degradation Policy:**
+```yaml
+degradation:
+  level_0:  # Normal
+    split_point: auto
+    telemetry_interval: 30s
+  level_1:  # High latency
+    split_point: -1  # One step more local
+    telemetry_interval: 60s
+  level_2:  # Packet loss > 10%
+    split_point: -2
+    telemetry_interval: 120s
+    compression: high
+  level_3:  # Disconnected
+    split_point: local_only
+    telemetry_interval: 0  # Queue locally
+    model_update: paused
+```
+
+---
+
+## Part 7: Security & Compliance (15 minutes)
+
+### Threat Model for Edge AI
+
+| Attack Vector | Impact | Mitigation |
+|---------------|--------|------------|
+| **Model extraction** | IP theft, adversarial attacks | Encryption at rest, TPM-backed keys, obfuscation |
+| **Adversarial input** | Wrong predictions | Input validation, detection, ensemble voting |
+| **Model tampering (OTA)** | Malicious behavior | Signed artifacts, secure boot, measured boot |
+| **Data exfiltration** | Privacy violation | Local processing, differential privacy, no raw data egress |
+| **Side-channel (power/timing)** | Key extraction | Constant-time inference, noise injection |
+| **Supply chain** | Compromised base image | SBOM, image signing, reproducible builds |
+
+### Compliance at the Edge
+
+| Regulation | Edge Requirement | Implementation |
+|------------|------------------|----------------|
+| **GDPR** | Data minimization, right to deletion | No PII in telemetry; local inference; secure erase on decommission |
+| **HIPAA** | PHI protection | Encrypted model + data; audit logs; access controls |
+| **IEC 62443** | Industrial cybersecurity | Zone/conduit model; secure comms; patch management |
+| **NIS2** | Critical infrastructure resilience | HA edge pairs; automated failover; incident reporting |
+
+---
+
+## Summary
+
+**Key Operational Takeaways:**
+
+1. **Model as artifact** — Versioned, signed, platform-specific, with metadata
+2. **Delta OTA** — 90%+ bandwidth reduction; staged rollouts with auto-rollback
+3. **Container/WASM runtime** — Isolation, resource limits, hardware access
+4. **Four golden signals** — Latency, traffic, errors, saturation per device
+5. **Zero-touch provisioning** — Certificates, config, model assignment automated
+6. **Adaptive split computing** — Runtime split point based on network/device conditions
+7. **Graceful degradation** — Local-only fallback when cloud disconnected
+8. **Security by design** — Signed models, encrypted storage, minimal attack surface
+
+---
+
+## Discussion Questions
+
+- How do you test OTA updates across 50+ device hardware variants?
+- What's the right telemetry granularity: per-inference vs. aggregated?
+- How do you handle model rollback when the new model breaks only 1% of devices?
+- When does WASM make sense vs. containers for edge inference?
+
+---
+
+## Further Reading (Systems/Operations Focus)
+
+- **MLSysBook Vol 2**: [Fleet Orchestration](https://mlsysbook.ai/vol2/contents/vol2/fleet_orchestration/fleet_orchestration.html), [Inference at Scale](https://mlsysbook.ai/vol2/contents/vol2/inference_at_scale/inference_at_scale.html), [Performance Engineering](https://mlsysbook.ai/vol2/contents/vol2/performance_engineering/performance_engineering.html)
+- **KubeEdge**: Kubernetes-native edge orchestration — https://kubeedge.io/
+- **K3s**: Lightweight Kubernetes for edge — https://k3s.io/
+- **EdgeX Foundry**: Vendor-neutral IoT edge framework — https://www.edgexfoundry.org/
+- **OpenTelemetry for Edge**: https://opentelemetry.io/docs/instrumentation/
+- **TUF / in-toto**: Secure software supply chain — https://theupdateframework.io/

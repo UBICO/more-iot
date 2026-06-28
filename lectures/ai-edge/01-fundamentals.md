@@ -1,244 +1,324 @@
-# AI on the Edge: Fundamentals and Architecture
+# IoT Edge Architecture & Distributed Intelligence
 
 ## Lecture Overview
 
-This lecture provides a comprehensive introduction to Artificial Intelligence on Edge computing platforms from an **ML Systems Engineering** perspective. We will explore the fundamental concepts, architectural patterns, hardware considerations, and the critical distinctions between cloud-based AI and edge AI deployments using the **D·A·M (Data·Algorithm·Machine)** taxonomy from Harvard's *Machine Learning Systems* textbook.
-
-By the end of this session, students will understand the engineering trade-offs and quantitative analysis required for deploying AI models on resource-constrained devices.
+This lecture examines Edge AI from an **IoT Systems Engineering** perspective — focusing on distributed system architecture, networked device fleets, split computing, and the infrastructure that enables intelligence at the edge. We move beyond single-device ML optimization to understand how IoT systems coordinate computation across heterogeneous edge nodes, gateways, and cloud.
 
 **Duration:** 2 hours  
-**Target audience:** Computer Science graduate students with basic understanding of IoT systems and machine learning concepts  
-**Reference:** *Machine Learning Systems* (MLSysBook) by Vijay Janapa Reddi et al., MIT Press 2026 — https://mlsysbook.ai/
+**Target audience:** Computer Science graduate students with IoT/distributed systems background  
+**Reference:** *Machine Learning Systems at Scale* (MLSysBook Vol 2) — https://mlsysbook.ai/vol2/
 
 ---
 
-## Part 1: Understanding Edge AI through the D·A·M Taxonomy (30 minutes)
+## Part 1: The Edge as a Distributed System (25 minutes)
 
-### The D·A·M Framework for Edge AI
+### From Centralized Factory to Decentralized Network
 
-The **Data · Algorithm · Machine (D·A·M) taxonomy** is the primary diagnostic framework for ML systems engineering. It formalizes the interdependence between:
+**Traditional ML (Centralized):**
+```
+[Data Collection] → [Cloud Training] → [Cloud Inference] → [Results]
+         ↓               ↓                  ↓
+    IoT Devices    GPU Cluster         API Service
+```
 
-| Axis | Domain | Primary Constraint | Edge AI Relevance |
-|------|--------|-------------------|-------------------|
-| **Data (D)** | Information (The Fuel) | Bandwidth (BW) | Edge reduces Dvol/BW by processing locally |
-| **Algorithm (A)** | Logic (The Blueprint) | Operations (O) | Model compression reduces O |
-| **Machine (M)** | Physics (The Engine) | Throughput (Rpeak) | Edge hardware has lower Rpeak |
+**Edge Intelligence (Decentralized - MLSysBook Vol 2):**
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    EDGE FLEET                                │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐        │
+│  │ Sensor  │  │ Gateway │  │ Edge    │  │ Cloud   │        │
+│  │ Node    │──│ / Edge  │──│ Server  │──│ (Train) │        │
+│  │ (MCU)   │  │ (SBC)   │  │ (GPU)   │  │         │        │
+│  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘        │
+│       │            │            │            │              │
+│       └────────────┴────────────┴────────────┘              │
+│                    FEDERATED COORDINATION                    │
+└─────────────────────────────────────────────────────────────┘
+```
 
-**Core Principle**: "In production, 'it is slow' and 'it is wrong' are rarely informative symptoms." Without a taxonomy, teams optimize the wrong thing—buying faster accelerators to fix a slow input pipeline, or rewriting kernels when the model is simply too large for the latency budget.
+**Key Shift (MLSysBook):** ML moves from a *centralized factory model* to a *decentralized, continuously adapting network*.
 
-### What is Edge AI?
+### The Fleet Stack (Bottom-Up)
 
-Edge AI refers to the deployment and execution of artificial intelligence algorithms directly on edge devices—computing nodes located at the periphery of the network, physically close to data sources. From a D·A·M perspective:
+From MLSysBook Vol 2 Part I — The Fleet:
 
-- **Data (D)**: Process locally → reduces Dvol/BW by orders of magnitude (million-fold for video)
-- **Algorithm (A)**: Compressed models (quantization, pruning, distillation) → reduces O
-- **Machine (M)**: Specialized edge accelerators (NPUs, TPUs) → improves Rpeak and ηhw for specific workloads
-
-### Edge AI vs. Cloud AI: A D·A·M Comparison
-
-| Aspect | Cloud AI | Edge AI | D·A·M Analysis |
-|--------|----------|---------|----------------|
-| **Latency** | High (network round-trip + processing) | Ultra-low (local only) | Eliminates network latency term |
-| **Bandwidth** | Requires constant high-BW | Minimal, intermittent | Dvol/BW → near zero |
-| **Privacy** | Data leaves device | Data stays local | Data (D) sovereignty |
-| **Compute (Rpeak)** | Unlimited (server GPUs) | Constrained | Machine (M) limited |
-| **Power** | Unlimited (grid) | Battery/solar | Machine (M) energy budget |
-| **Operations (O)** | Large models | Compressed | Algorithm (A) must reduce O |
+| Layer | Components | Role in Edge AI |
+|-------|------------|-----------------|
+| **Silicon** | MCU, NPU, GPU, CPU | Heterogeneous compute |
+| **Node** | Raspberry Pi, Jetson, Industrial PC | Single device runtime |
+| **Rack/Cluster** | Edge server racks, micro-datacenters | Local aggregation |
+| **Fabric** | WiFi, 5G, LoRaWAN, Ethernet, TSN | Inter-node communication |
+| **Orchestration** | K3s, KubeEdge, EdgeX, Balena | Fleet management |
 
 ---
 
-## Part 2: The Iron Law of ML Performance (20 minutes)
+## Part 2: Split Computing & Model Partitioning (30 minutes)
 
-### The Iron Law Equation
+### Why Split Computing?
 
-The performance of any ML task is governed by the **Iron Law**:
+**Constraints driving split inference:**
+| Constraint | Cloud-Only | Edge-Only | Split Computing |
+|------------|------------|-----------|-----------------|
+| **Model Size** | Unlimited | < Device Memory | Partitioned |
+| **Latency** | High (RTT) | Low | Early exit / partial |
+| **Privacy** | Data leaves | Data stays | Raw data local |
+| **Bandwidth** | High | Zero | Activations only |
+| **Energy** | N/A | Battery-limited | Offload heavy layers |
 
+### Partitioning Strategies
+
+#### 1. Early Exit (BranchyNet)
 ```
-T = Dvol/BW + O/(Rpeak·ηhw) + Llat
+Input → [Layer 1] → [Layer 2] → [Exit 1?] → [Layer 3] → [Exit 2?] → [Layer 4] → Output
+              ↑                              ↑
+         Easy samples                  Hard samples
+         (low latency)                 (high accuracy)
 ```
 
-| Term | Meaning | Edge AI Optimization |
-|------|---------|---------------------|
-| **Dvol/BW** | Data movement time | **Edge advantage**: Dvol → metadata only |
-| **O/(Rpeak·ηhw)** | Compute time | **Edge challenge**: Rpeak limited, must reduce O |
-| **Llat** | Overhead (kernel launch, sync) | Critical for real-time edge |
+**IoT Application**: Keyword spotting on MCU → exit early for confident predictions; offload uncertain to gateway.
 
-### Iron Law Applied to Edge vs Cloud
-
+#### 2. Layer-wise Partition (Split Point)
 ```
-Cloud: T = Dvol/BW_network + O/(Rpeak_cloud·ηhw) + Llat
-Edge:  T = Dvol/BW_memory  + O/(Rpeak_edge·ηhw)  + Llat
+┌─────────────────────┐     Activations      ┌─────────────────────┐
+│      EDGE DEVICE    │ ──────────────────→  │     EDGE SERVER     │
+│  [Layers 1...k]     │   (tensor, < 1MB)    │  [Layers k+1...N]   │
+│                     │ ←──────────────────  │                     │
+│  - Feature extract  │   Gradients /        │  - Classification   │
+│  - Privacy preserve │   Results            │  - Heavy compute    │
+└─────────────────────┘                      └─────────────────────┘
 ```
 
-**Key insight**: For edge, the data term shifts from network bandwidth to memory bandwidth. The compute term becomes dominant because Rpeak_edge ≪ Rpeak_cloud. This forces **Algorithm (A)** optimization: reduce O via quantization, pruning, distillation.
+**Split Point Selection Criteria (MLSysBook):**
+- **Communication volume**: Activation tensor size at split
+- **Compute balance**: O_edge vs O_server
+- **Privacy boundary**: Raw data never leaves edge
+- **Network reliability**: Can tolerate intermittent connectivity
 
-### The Memory Wall
+#### 3. Collaborative Inference (Multi-Device)
+```
+[Camera 1] ──→ [Edge Gateway] ←── [Camera 2]
+                │
+                ↓
+         [Fused Inference]
+                │
+                ↓
+         [Decision/Action]
+```
 
-From MLSysBook: **"Arithmetic is nearly free; data movement dominates cost (time, energy)."**
+**IoT Example**: Multi-camera object tracking in warehouse — each camera runs detection, gateway fuses tracks.
 
-- DRAM access (~640 pJ) costs **100–20,000×** more energy than a MAC (~3.7 pJ) or SRAM access (~0.5 pJ)
-- For edge devices on battery, **memory access is the primary energy consumer**
-- **Arithmetic Intensity (AI)** = FLOP/byte moved from memory
-  - High AI (> Ridge Point) → Compute-bound (benefits from TFLOP/s)
-  - Low AI (< Ridge Point) → Memory-bound (benefits from bandwidth/reuse)
+### Quantifying Split Computing Trade-offs
 
-**Edge implication**: Most edge models are **memory-bound**. Optimization must focus on:
-1. Reducing model size (weights fit in SRAM/flash)
-2. Operator fusion (reduce intermediate memory traffic)
-3. Data reuse (tiling, caching)
+**Iron Law for Split Inference:**
+```
+T_total = T_edge_compute + T_transfer + T_server_compute + T_return
+
+T_edge_compute    = O_edge / (R_edge · η_edge)
+T_transfer        = Activation_Size / BW_network
+T_server_compute  = O_server / (R_server · η_server)
+```
+
+**Optimization Problem:**
+```
+minimize T_total
+subject to:
+  - Activation_Size ≤ BW_network × Latency_Budget
+  - Edge_Memory_Peak ≤ Device_RAM
+  - Privacy: Raw_Data never transmitted
+```
 
 ---
 
-## Part 3: Hardware Acceleration for Edge (25 minutes)
+## Part 3: Edge Fleet Architecture & Device Hierarchy (20 minutes)
 
-### Specialization Waves (Post-Dennard Scaling ~2005)
+### Device Tier Classification (MLSysBook Vol 2)
 
-1. **FP Coprocessors** (1980): 100× gain for FP
-2. **Parallel GPUs** (1999→2006): Massive lightweight parallelism
-3. **Domain-Specific Architectures (DSAs)** (TPUv1, 2015): **15–30× faster, 30–80× perf/watt** vs K80 GPU
-4. **ML-Specific Refinement**: Tensor Cores, Systolic Arrays, Sparsity, Mixed Precision
+| Tier | Device Class | Compute | Memory | Power | Typical Role |
+|------|--------------|---------|--------|-------|--------------|
+| **Tier 1** | Microcontroller (ESP32, STM32, RP2040) | ~0.03 TOPS | 256 KB - 2 MB SRAM | 10-100 mW | Sensor preprocessing, keyword spot, simple anomaly |
+| **Tier 2** | SBC / Edge Gateway (Pi 4/5, Jetson Nano, Industrial) | 0.5-10 TOPS | 1-8 GB | 2-15 W | Model partition head, sensor fusion, protocol translation |
+| **Tier 3** | Edge Server (Jetson AGX, x86+GPU, Micro-DC) | 20-200 TOPS | 16-128 GB | 30-300 W | Model partition tail, multi-stream, training coordination |
+| **Tier 4** | Cloud / Regional DC | Unlimited | Unlimited | Grid | Full training, global model registry, fleet orchestration |
 
-### Dark Silicon & Efficiency Requirements
+### IoT Protocol Stack for Edge AI
 
-**Hennessy/Patterson**: DSAs require **≥10× efficiency** over general-purpose to justify dedicated silicon. Thermal limits prevent powering >30–50% transistors simultaneously ("Dark Silicon").
+```
+┌────────────────────────────────────────────────────────────┐
+│                    APPLICATION LAYER                        │
+│  MQTT Topics: inference/request, inference/response,       │
+│  model/update, telemetry/metrics, health/status            │
+├────────────────────────────────────────────────────────────┤
+│                    TRANSPORT LAYER                          │
+│  MQTT over TLS/TCP, CoAP over DTLS/UDP, gRPC, WebSocket    │
+├────────────────────────────────────────────────────────────┤
+│                    NETWORK LAYER                            │
+│  WiFi (802.11n/ac/ax), 5G NR, LoRaWAN, Ethernet, TSN       │
+├────────────────────────────────────────────────────────────┤
+│                    LINK / PHYSICAL                          │
+│  IEEE 802.15.4, Bluetooth LE, Matter/Thread, CAN bus       │
+└────────────────────────────────────────────────────────────┘
+```
 
-### Edge Hardware Landscape: Compute Primitives
-
-| Primitive | Operation Type | Hardware Mapping | Edge Examples |
-|-----------|----------------|------------------|---------------|
-| **Matrix** | Many-to-Many (GEMM, Conv, Attention) | **Tensor Cores / Systolic Arrays** | Jetson Tensor Cores, Edge TPU, Apple Neural Engine |
-| **Vector** | One-to-One (Activations, Norm, EW) | **SIMD / SIMT Units** | ARM NEON, RISC-V Vector Ext |
-| **Special Function (SFU)** | Nonlinear (Exp, Sqrt, Reciprocal) | **Dedicated Units** | SFUs in NPUs |
-
-### Numerics & Precision Evolution (HW/SW Co-design)
-
-**Core Insight**: SW proved reduced precision works → HW added native support. This is **HW/SW Co-design** (Def 1.2): Violates traditional abstraction layers; algorithm constraints inform silicon, hardware shapes algorithms (e.g., INT8 quantization enables dense tensor-core packing).
-
-| Precision | Memory Traffic | Energy/Op (vs FP32) | Edge Hardware Support |
-|-----------|----------------|----------------------|----------------------|
-| FP32 | 1× | 1× | All |
-| FP16/BF16 | 0.5× | ~2× better | Tensor Cores, Jetson, Coral |
-| INT8 | 0.25× | **~30× less energy** | Tensor Cores, Edge TPU, ARM NEON |
-| INT4/FP4 | 0.125× | ~60× less energy | Latest (H100, Blackwell, Orin) |
-
-**Impact**: FP32→INT8 **halves memory traffic again**; INT8 **~30× less energy/op** than FP32. Attacks both sides of Roofline (Bandwidth + Compute Density).
-
-### Edge Platform Classification
-
-| Platform | Compute | Memory | Power | Rpeak (INT8) | Best For |
-|----------|---------|--------|-------|--------------|----------|
-| **MCU** (ESP32, STM32, RP2040) | Cortex-M (16-300 MHz) | 32 KB - 2 MB | 10-100 mW | ~0.01-0.1 TOPS | Keyword spotting, simple anomaly |
-| **SBC** (Pi 4/5, Jetson Nano) | Cortex-A (1-2 GHz) | 1-8 GB | 2-10 W | 0.5-10 TOPS | Object detection, audio, sensor fusion |
-| **Edge Server** (Jetson AGX, x86+GPU) | Multi-core + GPU | 16-128 GB | 30-300 W | 20-200 TOPS | Multi-camera, complex models |
+**Edge AI Payload Considerations:**
+- **Activation tensors**: Binary (protobuf/flatbuffers), not JSON
+- **Compression**: Quantized INT8 activations + entropy coding
+- **QoS**: MQTT QoS 1 for inference requests, QoS 0 for telemetry
+- **Topic design**: `edge/{device_id}/inference/{model_id}/{split_point}`
 
 ---
 
-## Part 4: Why Edge AI Matters — Quantitative Analysis (20 minutes)
+## Part 4: Fleet Management & Orchestration (20 minutes)
 
-### The Bandwidth Challenge: Iron Law Data Term
+### The Edge Fleet Control Plane
 
-Consider a surveillance camera capturing 1080p video at 30fps:
-- Raw video stream: ~1 Gbps (Dvol/BW_network)
-- Transmitting to cloud: Requires high-bandwidth, expensive network connections
-- Edge AI solution: Process locally, transmit only events (metadata) - < 1 Kbps
-- **Reduction**: Dvol/BW_network → **million-fold reduction**
+From MLSysBook Vol 2: **Fleet Orchestration** coordinates thousands of heterogeneous devices.
 
-### Latency Requirements: The Llat Constraint
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    CLOUD CONTROL PLANE                      │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
+│  │ Model       │  │ Fleet       │  │ Monitoring &        │  │
+│  │ Registry    │  │ Orchestrator│  │ Observability       │  │
+│  │ (versions,  │  │ (KubeEdge,  │  │ (Prometheus,        │  │
+│  │  artifacts) │  │  K3s,       │  │  Grafana, Loki)     │  │
+│  └──────┬──────┘  └──────┬──────┘  └──────────┬──────────┘  │
+└─────────┼────────────────┼─────────────────────┼─────────────┘
+          │                │                     │
+          ▼                ▼                     ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    EDGE DATA PLANE                          │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐        │
+│  │ Device  │  │ Device  │  │ Device  │  │ ...     │        │
+│  │ Agent   │  │ Agent   │  │ Agent   │  │         │        │
+│  │ (OTA,   │  │ (OTA,   │  │ (OTA,   │  │         │        │
+│  │  health,│  │  health,│  │  health,│  │         │        │
+│  │  exec)  │  │  exec)  │  │  exec)  │  │         │        │
+│  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘        │
+└───────┼────────────┼────────────┼─────────────┼─────────────┘
+        │            │            │             │
+        ▼            ▼            ▼             ▼
+   ┌─────────────────────────────────────────────┐
+   │          EDGE WORKLOADS (Pods/Containers)   │
+   │  ┌────────┐ ┌────────┐ ┌────────┐          │
+   │  │Inference│ │Data    │ │Model   │  ...    │
+   │  │Runtime │ │Ingest  │ │Adapter │         │
+   │  └────────┘ └────────┘ └────────┘          │
+   └─────────────────────────────────────────────┘
+```
 
-| Domain | Required Latency | Cloud Feasible? | Edge Necessary? | Constraint |
-|--------|------------------|-----------------|-----------------|------------|
-| Industrial automation | < 1 ms | ❌ | ✅ | Llat dominates |
-| Autonomous vehicles | < 100 ms | ❌ | ✅ | Dvol/BW + O/R |
-| Augmented reality | < 20 ms | ❌ | ✅ | Llat dominates |
-| Smart home control | < 1 s | ⚠️ | ✅ | Dvol/BW acceptable |
-| Predictive maintenance | < 10 s | ✅ | ✅ | Either works |
-| Energy optimization | < 1 min | ✅ | ⚠️ | Cloud acceptable |
+### Device Agent Responsibilities (Edge Side)
 
-### Privacy and Security: Data (D) Sovereignty
+| Function | Implementation |
+|----------|----------------|
+| **Model OTA** | Delta updates (bsdiff), signature verification, rollback |
+| **Health Monitoring** | Heartbeat, resource usage (CPU, RAM, GPU, temp, power) |
+| **Workload Execution** | Container runtime (containerd, K3s), WASM for isolation |
+| **Telemetry** | Structured logs, metrics push (Prometheus pushgateway) |
+| **Local Autonomy** | Cache model, queue requests during disconnect, FIFO retry |
 
-- **On-device processing** of Personally Identifiable Information (PII)
-- **Federated learning**: Models improve without sharing data
-- **Regulatory compliance**: GDPR, HIPAA, local data residency laws
+### Fleet Orchestration Patterns
+
+| Pattern | Use Case | Tooling |
+|---------|----------|---------|
+| **GitOps** | Declarative model/desired state in Git | Flux, ArgoCD on K3s |
+| **Blue/Green** | Zero-downtime model rollout | Dual model slots, traffic switch |
+| **Canary** | Risk mitigation for new models | 5% → 25% → 100% rollout |
+| **Shadow** | Validate without affecting production | Mirror traffic to new model |
 
 ---
 
-## Part 5: Edge AI Architectures (15 minutes)
+## Part 5: Data Engineering for Edge Fleets (15 minutes)
 
-### Architecture Pattern 1: Cloud-Edge Hybrid (D·A·M Coordination)
-
-```
-[IoT Devices] → [Edge Nodes] → [Cloud Backend]
-     Data              AI              Model
-                     Inference       Training
-                     (reduce O)      (full O)
-```
-
-- **Data (D)**: Edge filters Dvol; only anomalies/metadata to cloud
-- **Algorithm (A)**: Edge runs compressed model (reduced O); Cloud trains full model
-- **Machine (M)**: Edge uses NPU for inference; Cloud uses GPU cluster for training
-- **Pipelining**: `T = max(Dvol/BW_edge, O_edge/R_edge) + O_cloud/R_cloud`
-
-### Architecture Pattern 2: Hierarchical Edge
+### The Data Path: Sensor → Inference → Action
 
 ```
-[Sensor Layer] → [Gateway Layer] → [Edge Server Layer] → [Cloud (optional)]
-   (MCU)            (SBC)              (Server)
-   O~10^6           O~10^9             O~10^12
-   R~0.01 TOPS      R~1 TOPS           R~100 TOPS
+[Sensor] → [Preprocess] → [Queue/Buffer] → [Inference] → [Postprocess] → [Actuate/Alert]
+   │           │              │              │              │               │
+   │           │              │              │              │               │
+   ▼           ▼              ▼              ▼              ▼               ▼
+Raw Data  Normalized    Time-series    Tensor          Decision       MQTT/HTTP/
+(MQTT/     (scale,       buffer with    (INT8,          logic,       CoAP to
+CoAP)      crop,         backpressure   FP16)           confidence   Cloud/SCADA
+          augment)       handling
 ```
 
-- **Selective offloading**: Only complex tasks go upstream
-- Each layer handles its O within local Rpeak budget
+### Edge Data Challenges (MLSysBook D·A·M)
 
-### Architecture Pattern 3: Fully Distributed Edge
+| Challenge | Data (D) Axis Impact | System Solution |
+|-----------|---------------------|-----------------|
+| **Intermittent connectivity** | Dvol/BW spikes on reconnect | Local buffering, store-and-forward |
+| **Heterogeneous sensors** | Schema mismatch | Protocol translation at gateway (EdgeX) |
+| **Time synchronization** | Distributed trace corruption | PTP/NTP, logical clocks for ordering |
+| **Data gravity** | Cost to move vs compute | Compute at source, move results |
+| **Privacy/Compliance** | Data residency | Local processing, federated learning |
 
-```
-[Device 1] → [Device 2] → [Device 3]
-     │              │              │
-     └─────────── [Peer-to-Peer] ──┘
-```
+### Time-Series Data at the Edge
 
-- **Collaborative inference**: Distributed O across devices
-- **Consensus mechanisms** for critical applications
-- **Fail-safe operation** even if individual nodes fail
+**InfluxDB / TimescaleDB / VictoriaMetrics** on edge gateway:
+- **Retention policies**: Raw (7d) → Aggregated (1y)
+- **Downsampling**: 1Hz → 1min avg, max, min, stddev
+- **Continuous queries**: Pre-compute features for ML
 
 ---
 
-## Part 6: Frameworks and Tools through D·A·M Lens (10 minutes)
+## Part 6: Network Fabric for Distributed Edge AI (10 minutes)
 
-| Framework | Algorithm (A) Support | Machine (M) Target | Data (D) Handling |
-|-----------|----------------------|-------------------|-------------------|
-| **TensorFlow Lite** | PTQ, QAT, Pruning, Clustering | GPU, DSP, NPU delegates; TFLite Micro for MCU | Representative dataset for calibration |
-| **ONNX Runtime** | Quantization-aware training | Execution providers (CPU, CUDA, TensorRT, NPU) | Cross-platform model format |
-| **Edge Impulse** | Auto-optimization, NAS | MCU, SBC, GPU targets | End-to-end data pipeline |
-| **Apache TVM** | Kernel tuning, operator fusion | AOT compilation to target ISA | Memory planning for constrained devices |
-| **MLSys·im** | First-principles performance modeling | Simulates Rpeak, BW, ηhw | Predicts T = max(D/BW, O/R) |
+### Connectivity Requirements by Tier
+
+| Link | Bandwidth | Latency | Reliability | Use Case |
+|------|-----------|---------|-------------|----------|
+| **Sensor → Gateway** | 100 Kbps - 10 Mbps | < 10 ms | Best-effort | MQTT/CoAP telemetry |
+| **Gateway ↔ Edge Server** | 100 Mbps - 10 Gbps | < 5 ms | High (TSN) | Split computing activations |
+| **Edge Server ↔ Cloud** | 100 Mbps - 10 Gbps | 10-100 ms | Standard | Model updates, fleet mgmt |
+
+### Network-Aware Split Computing
+
+**Adaptive split point based on network conditions:**
+```python
+def select_split_point(network_bw_mbps, latency_budget_ms):
+    """
+    Choose split layer based on current network.
+    Returns layer index where activation fits in budget.
+    """
+    activation_sizes = get_activation_sizes_per_layer()  # MB per layer
+    compute_times = get_compute_time_per_layer()  # ms per layer
+    
+    for i, (act_size, comp_time) in enumerate(zip(activation_sizes, compute_times)):
+        transfer_time = (act_size * 8) / network_bw_mbps  # ms
+        total_edge_time = sum(compute_times[:i+1])
+        if total_edge_time + transfer_time < latency_budget_ms * 0.7:
+            return i
+    return 0  # Fallback: all on edge
+```
 
 ---
 
-## Summary and Questions
+## Summary
 
-**Key takeaways from this lecture:**
+**Key IoT Systems Takeaways:**
 
-1. **D·A·M Taxonomy**: Every edge AI decision involves Data, Algorithm, Machine trade-offs
-2. **Iron Law**: `T = Dvol/BW + O/(Rpeak·ηhw) + Llat` — Edge shifts balance toward compute term
-3. **Memory Wall**: Data movement dominates energy; arithmetic intensity determines bound
-4. **HW/SW Co-design**: Quantization enables hardware specialization (INT8 → Tensor Cores)
-5. **Architecture choice**: Hybrid, Hierarchical, or Distributed based on O, Rpeak, BW constraints
-
-**Discussion questions:**
-- For a given edge device (Rpeak, BW, power budget), how do you determine max feasible O?
-- What happens when quantization reduces O but destroys memory access patterns?
-- How do you pipeline D, A, M stages to achieve `T = max(...)` instead of `T = sum(...)`?
+1. **Edge is a distributed system** — not a single device; design for fleet heterogeneity
+2. **Split computing** — partition models across tiers based on compute/memory/bandwidth
+3. **Fleet orchestration** — GitOps, OTA, health monitoring, canary deployments
+4. **Protocol stack** — MQTT/CoAP for telemetry, binary protocols for activations
+5. **Data gravity** — compute at source, move only results; local buffering for resilience
+6. **Network-aware adaptation** — dynamic split points based on real-time link quality
 
 ---
 
-## Further Reading
+## Discussion Questions
 
-- **Primary**: *Machine Learning Systems* (MLSysBook) — https://mlsysbook.ai/
-  - Volume I: Chapters on Hardware Acceleration, Benchmarking, Model Compression
-  - D·A·M Taxonomy Appendix
-  - Iron Law and Roofline Model
-- TensorFlow Lite documentation: https://www.tensorflow.org/lite
-- NVIDIA Jetson developer resources: https://developer.nvidia.com/jetson
-- "TinyML: Machine Learning with TensorFlow Lite on Arduino and Ultra-Low-Power Microcontrollers" — Warden & Situnayake, 2020
+- How do you handle model version skew across a fleet of 10,000 heterogeneous devices?
+- What happens when the edge-server link fails during split inference?
+- How do you synchronize time across devices for distributed trace correlation?
+- When does federated learning make sense vs. cloud retraining + OTA?
+
+---
+
+## Further Reading (IoT Systems Focus)
+
+- **MLSysBook Vol 2**: [Edge Intelligence](https://mlsysbook.ai/vol2/contents/vol2/edge_intelligence/edge_intelligence.html), [Compute Infrastructure](https://mlsysbook.ai/vol2/contents/vol2/compute_infrastructure/compute_infrastructure.html), [Fleet Orchestration](https://mlsysbook.ai/vol2/contents/vol2/fleet_orchestration/fleet_orchestration.html)
+- **EdgeX Foundry**: Industrial IoT edge framework — https://www.edgexfoundry.org/
+- **KubeEdge / K3s**: Kubernetes at the edge — https://kubeedge.io/, https://k3s.io/
+- **Eclipse ioFog**: Edge compute platform — https://iofog.org/
+- **Split Computing Surveys**: "Split Learning over Edge Networks" (arXiv:2507.01041)
