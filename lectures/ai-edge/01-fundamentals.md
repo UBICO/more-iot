@@ -2,96 +2,195 @@
 
 ## Lecture Overview
 
-This lecture provides a comprehensive introduction to Artificial Intelligence on Edge computing platforms. We will explore the fundamental concepts, architectural patterns, hardware considerations, and the critical distinctions between cloud-based AI and edge AI deployments. By the end of this session, students will understand the technical challenges and opportunities inherent in deploying AI models on resource-constrained devices.
+This lecture provides a comprehensive introduction to Artificial Intelligence on Edge computing platforms from an **ML Systems Engineering** perspective. We will explore the fundamental concepts, architectural patterns, hardware considerations, and the critical distinctions between cloud-based AI and edge AI deployments using the **D·A·M (Data·Algorithm·Machine)** taxonomy from Harvard's *Machine Learning Systems* textbook.
+
+By the end of this session, students will understand the engineering trade-offs and quantitative analysis required for deploying AI models on resource-constrained devices.
 
 **Duration:** 2 hours  
-**Target audience:** Computer Science graduate students with basic understanding of IoT systems and machine learning concepts
+**Target audience:** Computer Science graduate students with basic understanding of IoT systems and machine learning concepts  
+**Reference:** *Machine Learning Systems* (MLSysBook) by Vijay Janapa Reddi et al., MIT Press 2026 — https://mlsysbook.ai/
 
 ---
 
-## Part 1: Understanding Edge AI (30 minutes)
+## Part 1: Understanding Edge AI through the D·A·M Taxonomy (30 minutes)
+
+### The D·A·M Framework for Edge AI
+
+The **Data · Algorithm · Machine (D·A·M) taxonomy** is the primary diagnostic framework for ML systems engineering. It formalizes the interdependence between:
+
+| Axis | Domain | Primary Constraint | Edge AI Relevance |
+|------|--------|-------------------|-------------------|
+| **Data (D)** | Information (The Fuel) | Bandwidth (BW) | Edge reduces Dvol/BW by processing locally |
+| **Algorithm (A)** | Logic (The Blueprint) | Operations (O) | Model compression reduces O |
+| **Machine (M)** | Physics (The Engine) | Throughput (Rpeak) | Edge hardware has lower Rpeak |
+
+**Core Principle**: "In production, 'it is slow' and 'it is wrong' are rarely informative symptoms." Without a taxonomy, teams optimize the wrong thing—buying faster accelerators to fix a slow input pipeline, or rewriting kernels when the model is simply too large for the latency budget.
 
 ### What is Edge AI?
 
-Edge AI refers to the deployment and execution of artificial intelligence algorithms directly on edge devices—computing nodes located at the periphery of the network, physically close to data sources. Unlike traditional cloud-based AI systems where data is transmitted to centralized servers for processing, Edge AI processes data locally, enabling:
+Edge AI refers to the deployment and execution of artificial intelligence algorithms directly on edge devices—computing nodes located at the periphery of the network, physically close to data sources. From a D·A·M perspective:
 
-- **Real-time inference**: Decisions made within milliseconds without network latency
-- **Bandwidth optimization**: Only relevant insights are transmitted, not raw data streams
-- **Privacy preservation**: Sensitive data remains local and is never transmitted
-- **Operational autonomy**: Systems continue functioning even without network connectivity
+- **Data (D)**: Process locally → reduces Dvol/BW by orders of magnitude (million-fold for video)
+- **Algorithm (A)**: Compressed models (quantization, pruning, distillation) → reduces O
+- **Machine (M)**: Specialized edge accelerators (NPUs, TPUs) → improves Rpeak and ηhw for specific workloads
 
-### Edge AI vs. Cloud AI: Key Differences
+### Edge AI vs. Cloud AI: A D·A·M Comparison
 
-| Aspect | Cloud AI | Edge AI |
-|--------|----------|---------|
-| **Latency** | High (network round-trip + processing time) | Ultra-low (local processing only) |
-| **Bandwidth** | Requires constant high-bandwidth connections | Minimal bandwidth, intermittent connectivity acceptable |
-| **Privacy** | Data leaves device, potential exposure | Data stays local, enhanced privacy |
-| **Scalability** | Centralized scaling challenges | Distributed, inherently scalable |
-| **Cost** | Pay-per-use cloud resources | Higher upfront hardware costs |
-| **Power** | Unlimited (server infrastructure) | Constrained by battery/solar limitations |
-
-### The Edge Computing Spectrum
-
-The edge is not a single point but a spectrum of computing resources distributed between cloud data centers and end devices:
-
-```
-Cloud Data Center → Regional Edge → Local Edge → Device Edge → Sensor/Microcontroller
-```
-
-Each layer offers different trade-offs in terms of compute capability, power consumption, and latency. Understanding this spectrum is crucial for selecting the appropriate architecture for AI workloads.
+| Aspect | Cloud AI | Edge AI | D·A·M Analysis |
+|--------|----------|---------|----------------|
+| **Latency** | High (network round-trip + processing) | Ultra-low (local only) | Eliminates network latency term |
+| **Bandwidth** | Requires constant high-BW | Minimal, intermittent | Dvol/BW → near zero |
+| **Privacy** | Data leaves device | Data stays local | Data (D) sovereignty |
+| **Compute (Rpeak)** | Unlimited (server GPUs) | Constrained | Machine (M) limited |
+| **Power** | Unlimited (grid) | Battery/solar | Machine (M) energy budget |
+| **Operations (O)** | Large models | Compressed | Algorithm (A) must reduce O |
 
 ---
 
-## Part 2: Why Edge AI Matters (20 minutes)
+## Part 2: The Iron Law of ML Performance (20 minutes)
 
-### The Bandwidth Challenge
+### The Iron Law Equation
+
+The performance of any ML task is governed by the **Iron Law**:
+
+```
+T = Dvol/BW + O/(Rpeak·ηhw) + Llat
+```
+
+| Term | Meaning | Edge AI Optimization |
+|------|---------|---------------------|
+| **Dvol/BW** | Data movement time | **Edge advantage**: Dvol → metadata only |
+| **O/(Rpeak·ηhw)** | Compute time | **Edge challenge**: Rpeak limited, must reduce O |
+| **Llat** | Overhead (kernel launch, sync) | Critical for real-time edge |
+
+### Iron Law Applied to Edge vs Cloud
+
+```
+Cloud: T = Dvol/BW_network + O/(Rpeak_cloud·ηhw) + Llat
+Edge:  T = Dvol/BW_memory  + O/(Rpeak_edge·ηhw)  + Llat
+```
+
+**Key insight**: For edge, the data term shifts from network bandwidth to memory bandwidth. The compute term becomes dominant because Rpeak_edge ≪ Rpeak_cloud. This forces **Algorithm (A)** optimization: reduce O via quantization, pruning, distillation.
+
+### The Memory Wall
+
+From MLSysBook: **"Arithmetic is nearly free; data movement dominates cost (time, energy)."**
+
+- DRAM access (~640 pJ) costs **100–20,000×** more energy than a MAC (~3.7 pJ) or SRAM access (~0.5 pJ)
+- For edge devices on battery, **memory access is the primary energy consumer**
+- **Arithmetic Intensity (AI)** = FLOP/byte moved from memory
+  - High AI (> Ridge Point) → Compute-bound (benefits from TFLOP/s)
+  - Low AI (< Ridge Point) → Memory-bound (benefits from bandwidth/reuse)
+
+**Edge implication**: Most edge models are **memory-bound**. Optimization must focus on:
+1. Reducing model size (weights fit in SRAM/flash)
+2. Operator fusion (reduce intermediate memory traffic)
+3. Data reuse (tiling, caching)
+
+---
+
+## Part 3: Hardware Acceleration for Edge (25 minutes)
+
+### Specialization Waves (Post-Dennard Scaling ~2005)
+
+1. **FP Coprocessors** (1980): 100× gain for FP
+2. **Parallel GPUs** (1999→2006): Massive lightweight parallelism
+3. **Domain-Specific Architectures (DSAs)** (TPUv1, 2015): **15–30× faster, 30–80× perf/watt** vs K80 GPU
+4. **ML-Specific Refinement**: Tensor Cores, Systolic Arrays, Sparsity, Mixed Precision
+
+### Dark Silicon & Efficiency Requirements
+
+**Hennessy/Patterson**: DSAs require **≥10× efficiency** over general-purpose to justify dedicated silicon. Thermal limits prevent powering >30–50% transistors simultaneously ("Dark Silicon").
+
+### Edge Hardware Landscape: Compute Primitives
+
+| Primitive | Operation Type | Hardware Mapping | Edge Examples |
+|-----------|----------------|------------------|---------------|
+| **Matrix** | Many-to-Many (GEMM, Conv, Attention) | **Tensor Cores / Systolic Arrays** | Jetson Tensor Cores, Edge TPU, Apple Neural Engine |
+| **Vector** | One-to-One (Activations, Norm, EW) | **SIMD / SIMT Units** | ARM NEON, RISC-V Vector Ext |
+| **Special Function (SFU)** | Nonlinear (Exp, Sqrt, Reciprocal) | **Dedicated Units** | SFUs in NPUs |
+
+### Numerics & Precision Evolution (HW/SW Co-design)
+
+**Core Insight**: SW proved reduced precision works → HW added native support. This is **HW/SW Co-design** (Def 1.2): Violates traditional abstraction layers; algorithm constraints inform silicon, hardware shapes algorithms (e.g., INT8 quantization enables dense tensor-core packing).
+
+| Precision | Memory Traffic | Energy/Op (vs FP32) | Edge Hardware Support |
+|-----------|----------------|----------------------|----------------------|
+| FP32 | 1× | 1× | All |
+| FP16/BF16 | 0.5× | ~2× better | Tensor Cores, Jetson, Coral |
+| INT8 | 0.25× | **~30× less energy** | Tensor Cores, Edge TPU, ARM NEON |
+| INT4/FP4 | 0.125× | ~60× less energy | Latest (H100, Blackwell, Orin) |
+
+**Impact**: FP32→INT8 **halves memory traffic again**; INT8 **~30× less energy/op** than FP32. Attacks both sides of Roofline (Bandwidth + Compute Density).
+
+### Edge Platform Classification
+
+| Platform | Compute | Memory | Power | Rpeak (INT8) | Best For |
+|----------|---------|--------|-------|--------------|----------|
+| **MCU** (ESP32, STM32, RP2040) | Cortex-M (16-300 MHz) | 32 KB - 2 MB | 10-100 mW | ~0.01-0.1 TOPS | Keyword spotting, simple anomaly |
+| **SBC** (Pi 4/5, Jetson Nano) | Cortex-A (1-2 GHz) | 1-8 GB | 2-10 W | 0.5-10 TOPS | Object detection, audio, sensor fusion |
+| **Edge Server** (Jetson AGX, x86+GPU) | Multi-core + GPU | 16-128 GB | 30-300 W | 20-200 TOPS | Multi-camera, complex models |
+
+---
+
+## Part 4: Why Edge AI Matters — Quantitative Analysis (20 minutes)
+
+### The Bandwidth Challenge: Iron Law Data Term
 
 Consider a surveillance camera capturing 1080p video at 30fps:
-- Raw video stream: ~1 Gbps
+- Raw video stream: ~1 Gbps (Dvol/BW_network)
 - Transmitting to cloud: Requires high-bandwidth, expensive network connections
 - Edge AI solution: Process locally, transmit only events (metadata) - < 1 Kbps
+- **Reduction**: Dvol/BW_network → **million-fold reduction**
 
-This represents a **million-fold reduction** in bandwidth requirements. For IoT deployments with hundreds or thousands of sensors, this difference is economically transformative.
+### Latency Requirements: The Llat Constraint
 
-### Latency Requirements Across Domains
+| Domain | Required Latency | Cloud Feasible? | Edge Necessary? | Constraint |
+|--------|------------------|-----------------|-----------------|------------|
+| Industrial automation | < 1 ms | ❌ | ✅ | Llat dominates |
+| Autonomous vehicles | < 100 ms | ❌ | ✅ | Dvol/BW + O/R |
+| Augmented reality | < 20 ms | ❌ | ✅ | Llat dominates |
+| Smart home control | < 1 s | ⚠️ | ✅ | Dvol/BW acceptable |
+| Predictive maintenance | < 10 s | ✅ | ✅ | Either works |
+| Energy optimization | < 1 min | ✅ | ⚠️ | Cloud acceptable |
 
-| Domain | Required Latency | Cloud AI Feasible? | Edge AI Necessary? |
-|--------|------------------|-------------------|-------------------|
-| Industrial automation | < 1 ms | ❌ | ✅ |
-| Autonomous vehicles | < 100 ms | ❌ | ✅ |
-| Augmented reality | < 20 ms | ❌ | ✅ |
-| Smart home control | < 1 s | ⚠️ | ✅ |
-| Predictive maintenance | < 10 s | ✅ | ✅ |
-| Energy optimization | < 1 min | ✅ | ⚠️ |
+### Privacy and Security: Data (D) Sovereignty
 
-### Privacy and Security Considerations
-
-In healthcare IoT devices monitoring patient vitals, transmitting raw data to cloud servers creates HIPAA compliance risks and potential attack vectors. Edge AI enables:
 - **On-device processing** of Personally Identifiable Information (PII)
-- **Federated learning** approaches where models improve without sharing data
-- **Regulatory compliance** with GDPR, HIPAA, and other data protection laws
+- **Federated learning**: Models improve without sharing data
+- **Regulatory compliance**: GDPR, HIPAA, local data residency laws
 
 ---
 
-## Part 3: Edge AI Architectures (25 minutes)
+## Part 5: Edge AI Architectures (15 minutes)
 
-### Architecture Pattern 1: Cloud-Edge Hybrid
+### Architecture Pattern 1: Cloud-Edge Hybrid (D·A·M Coordination)
 
 ```
 [IoT Devices] → [Edge Nodes] → [Cloud Backend]
      Data              AI              Model
                      Inference       Training
-                     Local           Centralized
+                     (reduce O)      (full O)
 ```
 
-In this hybrid architecture:
-- Edge nodes perform inference on incoming data streams
-- Anomalous patterns or misclassified data are sent to cloud for model refinement
-- Periodic model updates are pushed from cloud to edge nodes
-- Cloud maintains ground truth and performs heavy computational training
+- **Data (D)**: Edge filters Dvol; only anomalies/metadata to cloud
+- **Algorithm (A)**: Edge runs compressed model (reduced O); Cloud trains full model
+- **Machine (M)**: Edge uses NPU for inference; Cloud uses GPU cluster for training
+- **Pipelining**: `T = max(Dvol/BW_edge, O_edge/R_edge) + O_cloud/R_cloud`
 
-### Architecture Pattern 2: Fully Distributed Edge
+### Architecture Pattern 2: Hierarchical Edge
+
+```
+[Sensor Layer] → [Gateway Layer] → [Edge Server Layer] → [Cloud (optional)]
+   (MCU)            (SBC)              (Server)
+   O~10^6           O~10^9             O~10^12
+   R~0.01 TOPS      R~1 TOPS           R~100 TOPS
+```
+
+- **Selective offloading**: Only complex tasks go upstream
+- Each layer handles its O within local Rpeak budget
+
+### Architecture Pattern 3: Fully Distributed Edge
 
 ```
 [Device 1] → [Device 2] → [Device 3]
@@ -99,214 +198,21 @@ In this hybrid architecture:
      └─────────── [Peer-to-Peer] ──┘
 ```
 
-This pattern enables:
-- **Collaborative inference** where multiple devices contribute to decisions
+- **Collaborative inference**: Distributed O across devices
 - **Consensus mechanisms** for critical applications
-- **Load distribution** across multiple compute nodes
 - **Fail-safe operation** even if individual nodes fail
 
-### Architecture Pattern 3: Hierarchical Edge
-
-```
-[Sensor Layer] → [Gateway Layer] → [Edge Server Layer] → [Cloud (optional)]
-```
-
-Characteristics:
-- **Sensor layer**: Ultra-low power microcontrollers performing simple inference
-- **Gateway layer**: ARM-based SBCs (Raspberry Pi, NVIDIA Jetson Nano) handling complex models
-- **Edge server layer**: x86 servers with full GPU acceleration
-- **Selective offloading**: Only complex tasks go upstream
-
 ---
 
-## Part 4: Hardware Platforms for Edge AI (20 minutes)
+## Part 6: Frameworks and Tools through D·A·M Lens (10 minutes)
 
-### Microcontroller Units (MCUs) - Ultra-Low Power
-
-**Typical specifications:**
-- CPU: ARM Cortex-M series (16-300 MHz)
-- RAM: 32 KB - 1 MB
-- Storage: Flash memory (128 KB - 8 MB)
-- Power: Battery/solar powered, milliwatt consumption
-
-**Popular platforms:**
-- **ESP32**: Dual-core Xtensa, 520 KB RAM, WiFi/Bluetooth
-- **Arduino Nano 33 BLE**: Cortex-M4, 256 KB RAM, TensorFlow Lite Micro support
-- **STM32 Nucleo**: Various Cortex-M cores, up to 2 MB RAM
-- **Raspberry Pi RP2040**: Dual-core ARM Cortex-M0+, 264 KB RAM
-
-**Use cases:**
-- Simple anomaly detection
-- Keyword spotting (voice commands)
-- Basic image classification (few classes)
-- Time-series prediction on sensor data
-
-### Single Board Computers (SBCs) - Balanced Performance
-
-**Typical specifications:**
-- CPU: ARM Cortex-A series or x86 (1-8 GHz, 4-8 cores)
-- RAM: 1-16 GB
-- Storage: SD card, eMMC, or NVMe
-- Power: 2-15W consumption
-
-**Popular platforms:**
-- **Raspberry Pi 4/5**: Quad-core Cortex-A72/A76, up to 8GB RAM, TensorFlow Lite support
-- **NVIDIA Jetson Nano/Xavier NX**: GPU-accelerated, 4-32 GB RAM, full CUDA support
-- **Google Coral Dev Board**: Edge TPU for quantized models, 1-4 GB RAM
-- **Odroid XU4/N2+**: High-performance ARM, 2-4 GB RAM
-
-**Use cases:**
-- Image classification with CNNs
-- Object detection (YOLO variants)
-- Audio processing (speech recognition, noise cancellation)
-- Multi-modal sensor fusion
-
-### Edge Servers - High-Performance Edge
-
-**Typical specifications:**
-- CPU: x86-64 (Intel Xeon or AMD EPYC)
-- GPU: NVIDIA T4, A100, or AMD Instinct
-- RAM: 16-128 GB
-- Storage: NVMe SSDs, 500GB-4TB
-
-**Use cases:**
-- Real-time video analytics for multiple cameras
-- Large-scale sensor fusion
-- Running multiple concurrent AI models
-- Acting as regional aggregation points
-
----
-
-## Part 5: Edge AI Model Constraints (25 minutes)
-
-### Memory Constraints
-
-Edge devices have strict memory limitations that fundamentally alter model design:
-
-**Flash Storage Requirements:**
-- Model weights must fit within available flash
-- Typical CNNs require 1-10 MB for weights alone
-- MCUs often have < 1 MB total storage
-
-**RAM Requirements for Inference:**
-- Intermediate activations during forward pass
-- Working memory for input/output buffers
-- Runtime overhead for inference engine
-
-**Example calculation for a simple CNN:**
-```
-Input: 32x32x3 image (RGB)
-Conv1: 32 filters @ 3x3x3 = 864 parameters
-Conv2: 64 filters @ 3x3x32 = 18,432 parameters
-FC1: 128 units @ 64x4x4 = 13,107 parameters
-Output: 10 classes = 1,290 parameters
-Total parameters: ~33,693
-At FP16: 67 KB, At FP32: 133 KB
-With intermediate activations: 2-5x overhead
-```
-
-### Computational Constraints
-
-**MACs (Multiply-Accumulate Operations):**
-- Edge devices: 10^6 - 10^9 MACs per inference
-- Cloud GPUs: 10^12 - 10^15 MACs per inference
-- Power scales roughly with compute * voltage²
-
-**Power Consumption:**
-- MCU: 10-100 mW during inference
-- SBC: 1-5 W during inference
-- Edge server: 100-500 W during inference
-
-### Model Size vs. Accuracy Trade-offs
-
-| Platform | Max Model Size | Typical Accuracy Drop | Quantization Benefit |
-|----------|---------------|---------------------|---------------------|
-| MCU (Arduino Nano) | 50-100 KB | -15% to -30% | 4x size reduction |
-| SBC (Pi 4) | 5-50 MB | -5% to -15% | 2-4x size reduction |
-| Edge Server (Jetson) | 100+ MB | -0% to -5% | 2x size reduction |
-
----
-
-## Part 6: Edge AI Frameworks and Tools (15 minutes)
-
-### TensorFlow Lite
-
-TensorFlow Lite is Google's solution for mobile and edge ML:
-
-**Key features:**
-- Post-training quantization (FP32 → INT8, UINT8, or FP16)
-- Model pruning and clustering
-- Hardware acceleration delegates (GPU, DSP, NPU)
-- TensorFlow Lite Micro for MCUs (< 100 KB runtime)
-
-**Quantization process:**
-1. Calibration with representative dataset
-2. Weight quantization (per-channel or per-tensor)
-3. Activation quantization (during inference)
-4. Accuracy validation and fine-tuning
-
-### ONNX Runtime
-
-Microsoft's cross-platform inference engine with edge focus:
-
-**Edge-specific optimizations:**
-- ONNX Runtime Mobile for mobile/edge
-- Quantization-aware training support
-- Hardware acceleration via execution providers
-- Model format interoperability
-
-### Edge Impulse
-
-End-to-end platform for edge ML development:
-
-**Workflow:**
-1. Data acquisition and labeling
-2. Feature extraction (signal processing)
-3. Model training with automated optimization
-4. Deployment to target hardware
-5. Continuous learning via edge-to-cloud feedback
-
-### Apache TVM
-
-Open-source compiler stack for ML workloads:
-
-**Edge advantages:**
-- Automatic kernel tuning for target hardware
-- Operator fusion to reduce memory bandwidth
-- Memory planning for constrained devices
-- Model compilation to native machine code
-
----
-
-## Part 7: Practical Considerations (10 minutes)
-
-### Development Workflow Differences
-
-Traditional ML development → Edge ML development:
-
-| Stage | Traditional Cloud | Edge AI |
-|-------|-------------------|---------|
-| Model training | Any framework, any size | Must consider edge constraints |
-| Experimentation | Easy iteration, fast compute | Slower feedback, hardware testing |
-| Deployment | API endpoint | Firmware update, OTA considerations |
-| Monitoring | Centralized logging | Distributed observability |
-| Updates | Instant redeployment | Staged rollouts, rollback complexity |
-
-### Testing and Validation
-
-Edge AI requires additional validation steps:
-- **Hardware-in-the-loop testing**: Models must run on actual target hardware
-- **Environmental stress testing**: Temperature, vibration, power fluctuations
-- **Long-term reliability**: Days/weeks of continuous operation
-- **Edge-case handling**: What happens with malformed input?
-
-### Security Implications
-
-Edge devices are physically accessible to attackers:
-- **Model extraction attacks**: Sophisticated adversaries can steal trained models
-- **Adversarial examples**: Small input perturbations can cause misclassification
-- **Firmware tampering**: Physical access enables code modification
-- **Side-channel attacks**: Power analysis can reveal secrets
+| Framework | Algorithm (A) Support | Machine (M) Target | Data (D) Handling |
+|-----------|----------------------|-------------------|-------------------|
+| **TensorFlow Lite** | PTQ, QAT, Pruning, Clustering | GPU, DSP, NPU delegates; TFLite Micro for MCU | Representative dataset for calibration |
+| **ONNX Runtime** | Quantization-aware training | Execution providers (CPU, CUDA, TensorRT, NPU) | Cross-platform model format |
+| **Edge Impulse** | Auto-optimization, NAS | MCU, SBC, GPU targets | End-to-end data pipeline |
+| **Apache TVM** | Kernel tuning, operator fusion | AOT compilation to target ISA | Memory planning for constrained devices |
+| **MLSys·im** | First-principles performance modeling | Simulates Rpeak, BW, ηhw | Predicts T = max(D/BW, O/R) |
 
 ---
 
@@ -314,22 +220,25 @@ Edge devices are physically accessible to attackers:
 
 **Key takeaways from this lecture:**
 
-1. **Edge AI is fundamentally different** from cloud AI—constraints drive design decisions
-2. **Architecture matters**—choose between hybrid, distributed, or hierarchical based on latency/bandwidth/accuracy requirements
-3. **Hardware selection** must align with model complexity and power constraints
-4. **Frameworks provide tooling** but understanding underlying constraints is essential
-5. **Development workflows** require additional validation steps for production deployment
+1. **D·A·M Taxonomy**: Every edge AI decision involves Data, Algorithm, Machine trade-offs
+2. **Iron Law**: `T = Dvol/BW + O/(Rpeak·ηhw) + Llat` — Edge shifts balance toward compute term
+3. **Memory Wall**: Data movement dominates energy; arithmetic intensity determines bound
+4. **HW/SW Co-design**: Quantization enables hardware specialization (INT8 → Tensor Cores)
+5. **Architecture choice**: Hybrid, Hierarchical, or Distributed based on O, Rpeak, BW constraints
 
 **Discussion questions:**
-- What types of AI workloads are inappropriate for edge deployment?
-- How do you balance model accuracy against edge constraints?
-- What new failure modes emerge when moving from cloud to edge?
+- For a given edge device (Rpeak, BW, power budget), how do you determine max feasible O?
+- What happens when quantization reduces O but destroys memory access patterns?
+- How do you pipeline D, A, M stages to achieve `T = max(...)` instead of `T = sum(...)`?
 
 ---
 
 ## Further Reading
 
-- "Edge Intelligence: Machine Learning at the Network Periphery" - Zhang et al., 2021
+- **Primary**: *Machine Learning Systems* (MLSysBook) — https://mlsysbook.ai/
+  - Volume I: Chapters on Hardware Acceleration, Benchmarking, Model Compression
+  - D·A·M Taxonomy Appendix
+  - Iron Law and Roofline Model
 - TensorFlow Lite documentation: https://www.tensorflow.org/lite
 - NVIDIA Jetson developer resources: https://developer.nvidia.com/jetson
-- "TinyML: Machine Learning with TensorFlow Lite on Arduino and Ultra-Low-Power Microcontrollers" - Warden & Situnayake, 2020
+- "TinyML: Machine Learning with TensorFlow Lite on Arduino and Ultra-Low-Power Microcontrollers" — Warden & Situnayake, 2020
